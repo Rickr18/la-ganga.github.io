@@ -69,6 +69,12 @@
 
     // Kick OAuth2 – Client ID (implicit / token flow, no secret needed on the frontend)
     const KICK_CLIENT_ID  = '01KK5HRDE7D8XP14D70CYRH407';
+    // Fixed redirect URI – must be registered exactly as-is in the Kick developer portal.
+    // Using a constant avoids mismatches caused by dynamic computation (origin, pathname, etc.).
+    const KICK_REDIRECT_URI = 'https://rickr18.github.io/la-ganga.github.io/';
+    // Optional client_secret for temporary diagnostics ONLY – must NEVER be set in production
+    // because any value here is visible to all users in the browser source. Leave empty ('').
+    const KICK_CLIENT_SECRET = '';
     // App name shown in the "connected" badge (matches the registered Kick app)
     const KICK_APP_NAME   = 'laganga';
 
@@ -347,7 +353,7 @@
 
           const savedState  = localStorage.getItem('oauth_state');
           const verifier    = localStorage.getItem('pkce_verifier');
-          const redirectUri = localStorage.getItem('oauth_redirect_uri') || getOAuthRedirectUri();
+          const redirectUri = localStorage.getItem('oauth_redirect_uri') || KICK_REDIRECT_URI;
           localStorage.removeItem('pkce_verifier');
           localStorage.removeItem('oauth_state');
           localStorage.removeItem('oauth_redirect_uri');
@@ -355,11 +361,14 @@
           console.log('[OAuth] Callback received. redirect_uri used for token exchange:', redirectUri);
 
           if (savedState && stateParam !== savedState) {
+            console.error('[OAuth] State mismatch. Expected:', savedState, 'Got:', stateParam);
             setTimeout(() => showToast('⚠️ Error de seguridad OAuth (state mismatch)', '#ef4444'), 100);
             return;
           }
-          if (!verifier) {
-            setTimeout(() => showToast('⚠️ Error en flujo OAuth: verifier no encontrado', '#ef4444'), 100);
+          if (!verifier || verifier.length < 43) {
+            // RFC 7636 §4.1 requires code_verifier to be 43–128 characters.
+            console.error('[OAuth] pkce_verifier missing or too short. Length:', verifier ? verifier.length : 0);
+            setTimeout(() => showToast('⚠️ Error en flujo OAuth: verifier inválido', '#ef4444'), 100);
             return;
           }
 
@@ -373,6 +382,15 @@
                 code_verifier: verifier,
                 redirect_uri:  redirectUri,
               });
+              // Include client_secret only when set (⚠️ DIAGNOSTIC ONLY – visible in browser source,
+              // NEVER set this in production; a frontend secret is not a secret).
+              if (KICK_CLIENT_SECRET) body.set('client_secret', KICK_CLIENT_SECRET);
+
+              console.log('[OAuth] Sending token exchange. client_id:', KICK_CLIENT_ID,
+                '| redirect_uri:', redirectUri,
+                '| code_verifier length:', verifier.length,
+                '| client_secret present:', !!KICK_CLIENT_SECRET);
+
               const res = await fetch('https://id.kick.com/oauth/token', {
                 method:  'POST',
                 headers: {
@@ -393,7 +411,7 @@
                     if (errText && errText.length < 200) errMsg = errText;
                   }
                 } catch {}
-                setTimeout(() => showToast(`⚠️ Error OAuth: ${errMsg}`, '#ef4444'), 100);
+                setTimeout(() => showToast(`⚠️ Error OAuth ${res.status}: ${errMsg}`, '#ef4444'), 100);
                 return;
               }
               const data      = await res.json();
@@ -403,7 +421,8 @@
               localStorage.setItem('kick_token', token);
               setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
               setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
-            } catch {
+            } catch (err) {
+              console.error('[OAuth] Network error during token exchange:', err);
               setTimeout(() => showToast('⚠️ Error de red al obtener token OAuth', '#ef4444'), 100);
             }
           })();
@@ -581,11 +600,12 @@
           const codeChallenge = await generateCodeChallenge(codeVerifier);
           const oauthState    = generateCodeVerifier(); // random state for CSRF protection
 
-          // Normalize redirect URI: strip trailing index.html, ensure trailing slash.
-          // This must exactly match the Redirect URI registered in the Kick developer portal.
-          const redirectUri = getOAuthRedirectUri();
+          // Use the fixed redirect URI constant to guarantee consistency between
+          // the authorize request and the token exchange.
+          const redirectUri = KICK_REDIRECT_URI;
 
-          console.log('[OAuth] Starting PKCE flow. redirect_uri:', redirectUri);
+          console.log('[OAuth] Starting PKCE flow. redirect_uri:', redirectUri,
+            '| code_verifier length:', codeVerifier.length);
 
           // Store PKCE state in localStorage so it survives the full-page redirect to Kick
           localStorage.setItem('pkce_verifier',      codeVerifier);
@@ -1839,7 +1859,7 @@
                     <br/>
                     <strong style={{ color:'var(--yellow)' }}>Redirect URI (registrar en Kick):</strong>{' '}
                     <code style={{ fontFamily:'monospace', color:'var(--neon)', wordBreak:'break-all' }}>
-                      {getOAuthRedirectUri()}
+                      {KICK_REDIRECT_URI}
                     </code>
                     <br/>
                     <strong style={{ color:'var(--yellow)' }}>Scopes:</strong>{' '}
