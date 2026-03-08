@@ -72,9 +72,10 @@
     // Fixed redirect URI – must be registered exactly as-is in the Kick developer portal.
     // Using a constant avoids mismatches caused by dynamic computation (origin, pathname, etc.).
     const KICK_REDIRECT_URI = 'https://rickr18.github.io/la-ganga.github.io/';
-    // Optional client_secret for temporary diagnostics ONLY – must NEVER be set in production
-    // because any value here is visible to all users in the browser source. Leave empty ('').
-    const KICK_CLIENT_SECRET = 'bcc42d139103f313283456e83972d9d398bb15b5dea4cf96b9a621b0c5c0abae';
+    // Client secret injected at build time by GitHub Actions (see .github/workflows/deploy.yml).
+    // The source file stores only the placeholder; the real secret is kept in a GitHub Secret
+    // and is never committed to the repository.
+    const KICK_CLIENT_SECRET = '__KICK_CLIENT_SECRET__';
     // App name shown in the "connected" badge (matches the registered Kick app)
     const KICK_APP_NAME   = 'laganga';
 
@@ -382,14 +383,17 @@
                 code_verifier: verifier,
                 redirect_uri:  redirectUri,
               });
-              // Include client_secret only when set (⚠️ DIAGNOSTIC ONLY – visible in browser source,
-              // NEVER set this in production; a frontend secret is not a secret).
-              if (KICK_CLIENT_SECRET) body.set('client_secret', KICK_CLIENT_SECRET);
+              // Include client_secret only when it has been injected at build time
+              // (i.e., it is not the raw placeholder that ships in the source).
+              // Treat the value as absent when it still contains the build placeholder
+              // (i.e., the GitHub Actions workflow was not run or the secret was not set).
+              const effectiveSecret = KICK_CLIENT_SECRET && !KICK_CLIENT_SECRET.startsWith('__') ? KICK_CLIENT_SECRET : '';
+              if (effectiveSecret) body.set('client_secret', effectiveSecret);
 
               console.log('[OAuth] Sending token exchange. client_id:', KICK_CLIENT_ID,
                 '| redirect_uri:', redirectUri,
                 '| code_verifier length:', verifier.length,
-                '| client_secret present:', !!KICK_CLIENT_SECRET);
+                '| client_secret present:', !!effectiveSecret);
 
               const res = await fetch('https://id.kick.com/oauth/token', {
                 method:  'POST',
