@@ -67,31 +67,10 @@
     const KICK_CHAT   = id => `https://kick.com/${id}/chatroom`;
     const KICK_LINK   = id => `https://kick.com/${id}`;
 
-    // ⚠️ CONFIGURA TU CLIENT ID DE KICK AQUÍ
-    const KICK_CLIENT_ID = 'TU_CLIENT_ID_AQUÍ'; // Reemplaza con tu Client ID real
-    // ⚠️ SEGURIDAD: El Client Secret NUNCA debe ir en el frontend.
-    // Para flujos que requieran el Client Secret (intercambio de código, verificación
-    // de firma de webhooks), usa un backend. Ejemplo mínimo en Node.js/Express:
-    /*
-     *   const express = require('express');
-     *   const app = express();
-     *   const CLIENT_SECRET = process.env.KICK_CLIENT_SECRET; // cargado desde .env
-     *
-     *   app.post('/auth/token', async (req, res) => {
-     *     const { code } = req.body;
-     *     const resp = await fetch('https://id.kick.com/oauth/token', {
-     *       method: 'POST',
-     *       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-     *       body: new URLSearchParams({
-     *         grant_type: 'authorization_code', code,
-     *         client_id: process.env.KICK_CLIENT_ID,
-     *         client_secret: CLIENT_SECRET,
-     *         redirect_uri: process.env.REDIRECT_URI,
-     *       }),
-     *     });
-     *     res.json(await resp.json());
-     *   });
-     */
+    // Kick OAuth2 – Client ID (implicit / token flow, no secret needed on the frontend)
+    const KICK_CLIENT_ID  = '01KK5HRDE7D8XP14D70CYRH407';
+    // App name shown in the "connected" badge (matches the registered Kick app)
+    const KICK_APP_NAME   = 'laganga';
 
     // Leandro = La Sapa. Su canal en Kick es "lasapaaaaa"
     const DEFAULT_STREAMERS = [
@@ -321,7 +300,9 @@
         document.title = state.pageTitle || 'La Ganga – Dashboard';
       }, [state.pageTitle]);
 
-      // Handle OAuth2 callback: read access_token from URL hash on load
+      // Handle OAuth2 callback: read access_token from URL hash on load.
+      // If loaded inside a popup (window.opener present), save the token to
+      // localStorage, notify the parent via postMessage, and close the popup.
       useEffect(() => {
         const hash = window.location.hash;
         if (!hash) return;
@@ -330,14 +311,38 @@
         const expiresIn = parseInt(params.get('expires_in') || '0', 10);
         if (token) {
           const expiry = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
-          setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
           localStorage.setItem('kick_token', token);
-          // Clean the hash from the URL without reloading
           history.replaceState(null, '', window.location.pathname + window.location.search);
-          // Will show toast after state update; use setTimeout to avoid render-phase side effect
+          // Popup flow: notify opener and close this window
+          if (window.opener && !window.opener.closed) {
+            try {
+              window.opener.postMessage(
+                { type: 'kick_oauth_token', token, expiry },
+                window.location.origin
+              );
+            } catch {}
+            window.close();
+            return;
+          }
+          // Redirect flow (fallback): update state directly
+          setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
           setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
         }
       // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+
+      // Listen for the token message sent by the OAuth popup
+      useEffect(() => {
+        function onMessage(e) {
+          if (e.origin !== window.location.origin) return;
+          if (e.data && e.data.type === 'kick_oauth_token') {
+            const { token, expiry } = e.data;
+            setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry || 0 }));
+            showToast('✅ Conectado a Kick con OAuth2');
+          }
+        }
+        window.addEventListener('message', onMessage);
+        return () => window.removeEventListener('message', onMessage);
       }, []);
 
       // fetch real Kick live status for all streamers
@@ -491,8 +496,11 @@
 
       function initiateKickOAuth() {
         const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-        const url = `https://id.kick.com/oauth/authorize?client_id=${KICK_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=token&scope=channel:read`;
-        window.location.href = url;
+        const url = `https://id.kick.com/oauth/authorize?response_type=token&client_id=${KICK_CLIENT_ID}&redirect_uri=${redirectUri}&scope=user:read%20chat:write`;
+        const popup = window.open(url, 'kick_oauth', 'width=520,height=680,scrollbars=yes,resizable=yes');
+        if (!popup) {
+          showToast('⚠️ Pop-up bloqueado. Habilítalo en tu navegador.', '#ef4444');
+        }
       }
 
       function disconnectKickOAuth() {
@@ -697,6 +705,8 @@
       const [customInput, setCustomInput] = useState('');
       const isMobile = useIsMobile();
 
+      const isKickConnected = !!(state.kickAccessToken && (!state.kickTokenExpiry || Date.now() < state.kickTokenExpiry));
+
       function handleAddCustom(e) {
         e.preventDefault();
         if (customInput.trim()) {
@@ -727,6 +737,18 @@
               </div>
               {!isMobile && <div style={{ fontSize:10, color:'var(--muted)', marginTop:1 }}>{state.subtitle || 'Multi-Stream Dashboard'}</div>}
             </div>
+            {/* "App Conectada" badge – shown when Kick OAuth token is valid */}
+            {isKickConnected && !isMobile && (
+              <div style={{
+                display:'flex', alignItems:'center', gap:5,
+                padding:'3px 9px', borderRadius:20, fontSize:10, fontWeight:700,
+                background:'rgba(34,197,94,.1)', border:'1px solid rgba(34,197,94,.3)',
+                color:'var(--live)', flexShrink:0,
+              }} title={`Conectado a la API de Kick como ${KICK_APP_NAME}`}>
+                <span style={{ width:6, height:6, borderRadius:'50%', background:'var(--live)', display:'inline-block' }} className="dot-live" />
+                App Conectada: {KICK_APP_NAME}
+              </div>
+            )}
           </div>
 
           {/* Center – quick streamer pills (desktop only) */}
@@ -1682,7 +1704,7 @@
                   <h2 style={h2Style}>🔑 Kick OAuth2</h2>
                   <p style={pStyle}>
                     Conecta con la API oficial de Kick v2 para obtener datos adicionales como el conteo de seguidores.
-                    El token se guarda en la configuración local.
+                    El token se guarda en localStorage y persiste entre sesiones.
                   </p>
                   <div style={{
                     display:'flex', alignItems:'center', gap:10, padding:'10px 14px',
@@ -1692,7 +1714,7 @@
                     color: isKickConnected ? 'var(--live)' : 'var(--red)',
                   }}>
                     <span style={{ fontSize:18 }}>{isKickConnected ? '✅' : '❌'}</span>
-                    <span>{isKickConnected ? 'Conectado a Kick' : 'Sin token OAuth'}</span>
+                    <span>{isKickConnected ? `App Conectada: ${KICK_APP_NAME}` : 'Sin token OAuth'}</span>
                   </div>
                   <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
                     <button
@@ -1712,14 +1734,15 @@
                   </div>
                   <div style={{ fontSize:11, color:'var(--muted)', lineHeight:1.7 }}>
                     <strong style={{ color:'var(--white)' }}>¿Cómo funciona?</strong><br/>
-                    Al hacer clic en "Conectar con Kick" serás redirigido al portal de autorización de Kick.
-                    Tras autorizar, el token se captura automáticamente y se usa en las peticiones a la API v2.
+                    Al hacer clic en "Conectar con Kick" se abrirá una ventana emergente (pop-up) al portal de
+                    autorización de Kick. Tras autorizar, el token se captura automáticamente, se guarda en
+                    localStorage y se usa en las peticiones a la API v2. No se necesita backend.
                     <br/>
-                    <strong style={{ color:'var(--yellow)' }}>⚠️ Client ID configurado:</strong>{' '}
+                    <strong style={{ color:'var(--yellow)' }}>✅ Client ID:</strong>{' '}
                     <code style={{ fontFamily:'monospace', color:'var(--neon)' }}>{KICK_CLIENT_ID}</code>
-                    {KICK_CLIENT_ID === 'TU_CLIENT_ID_AQUÍ' && (
-                      <span style={{ color:'var(--red)', marginLeft:6 }}>← Reemplaza en el código</span>
-                    )}
+                    <br/>
+                    <strong style={{ color:'var(--yellow)' }}>Scopes:</strong>{' '}
+                    <code style={{ fontFamily:'monospace', color:'var(--muted2)' }}>user:read chat:write</code>
                   </div>
                 </section>
 
@@ -1727,6 +1750,7 @@
                   <h2 style={h2Style}>🔔 Webhook de Discord</h2>
                   <p style={pStyle}>
                     Discord → Servidor → Canal → ⚙ Configuración → Integraciones → Webhooks.
+                    Las notificaciones se envían directamente desde el navegador (client-side fetch).
                   </p>
                   <div>
                     <label style={S.label}>URL del webhook</label>
@@ -1738,56 +1762,6 @@
                       style={S.btnNeon}>Guardar</button>
                     <button onClick={() => testWebhook(webhookInput)} style={S.btnOutline('var(--neon)')}>Probar</button>
                   </div>
-                </section>
-
-                {/* Kick Webhooks documentation card */}
-                <section style={sectionStyle}>
-                  <h2 style={h2Style}>🔗 Webhooks de Kick → Discord (Requiere backend)</h2>
-                  <p style={pStyle}>
-                    Para recibir eventos en tiempo real desde Kick (ej. cuando un streamer va en vivo),
-                    necesitas un servidor backend que reciba los webhooks de Kick y los reenvíe a Discord.
-                    El proyecto incluye un servidor Express mínimo en <code style={{color:'var(--neon)'}}>backend/server.js</code>.
-                  </p>
-                  <pre style={{
-                    background:'rgba(0,0,0,.5)', border:'1px solid var(--border)',
-                    borderRadius:8, padding:'14px 16px', fontSize:11,
-                    fontFamily:'monospace', lineHeight:1.8, color:'var(--muted2)',
-                    overflowX:'auto', whiteSpace:'pre-wrap', wordBreak:'break-word',
-                  }}>
-{`/*
- * ══════════════════════════════════════════════════════════
- * CONFIGURACIÓN DE WEBHOOKS DE KICK (Requiere backend)
- * ══════════════════════════════════════════════════════════
- *
- * 1. En el Developer Portal de Kick, habilita "Webhooks" en tu app
- *    y configura la URL: https://tu-servidor.com/kick-webhook
- *
- * 2. Kick enviará eventos POST a esa URL. Evento clave:
- *    - "stream.online" → cuando un streamer se pone en vivo
- *
- * 3. Ejemplo de handler en Node.js (Express):
- *
- *    app.post('/kick-webhook', (req, res) => {
- *      const event = req.body;
- *      if (event.type === 'stream.online') {
- *        const { broadcaster_user_login } = event.data;
- *        fetch(DISCORD_WEBHOOK_URL, {
- *          method: 'POST',
- *          headers: { 'Content-Type': 'application/json' },
- *          body: JSON.stringify({
- *            content: \`🟢 **\${broadcaster_user_login}** está EN VIVO en Kick!\`
- *          })
- *        });
- *      }
- *      res.sendStatus(200);
- *    });
- *
- * 4. El Client Secret se usa en el backend para verificar la firma
- *    del webhook (header: Kick-Event-Signature).
- *    NUNCA expongas el Client Secret en el frontend.
- * ══════════════════════════════════════════════════════════
- */`}
-                  </pre>
                 </section>
 
                 <section style={sectionStyle}>
