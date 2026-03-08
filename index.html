@@ -332,9 +332,15 @@
       // and legacy implicit grant (token in URL hash).
       useEffect(() => {
         // PKCE flow: authorization code returned as ?code=XXX&state=YYY after full-page redirect
-        const searchParams = new URLSearchParams(window.location.search);
-        const code       = searchParams.get('code');
-        const stateParam = searchParams.get('state');
+        // Use regex + decodeURIComponent instead of URLSearchParams.get() to avoid
+        // misinterpreting '+' as a space (application/x-www-form-urlencoded parsing behaviour).
+        function getRawParam(search, name) {
+          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const match = search.match(new RegExp('[?&]' + escaped + '=([^&#]*)'));
+          return match ? decodeURIComponent(match[1]) : null;
+        }
+        const code       = getRawParam(window.location.search, 'code');
+        const stateParam = getRawParam(window.location.search, 'state');
         if (code) {
           // Clean the URL immediately so the code is not visible or reused on refresh
           history.replaceState(null, '', window.location.pathname);
@@ -345,6 +351,8 @@
           localStorage.removeItem('pkce_verifier');
           localStorage.removeItem('oauth_state');
           localStorage.removeItem('oauth_redirect_uri');
+
+          console.log('[OAuth] Callback received. redirect_uri used for token exchange:', redirectUri);
 
           if (savedState && stateParam !== savedState) {
             setTimeout(() => showToast('⚠️ Error de seguridad OAuth (state mismatch)', '#ef4444'), 100);
@@ -377,9 +385,10 @@
                 let errMsg = `HTTP ${res.status}`;
                 try {
                   const errText = await res.text();
+                  console.error('[OAuth] Token exchange failed. Status:', res.status, 'Body:', errText);
                   try {
                     const errJson = JSON.parse(errText);
-                    errMsg = errJson.error_description || errJson.error || errMsg;
+                    errMsg = errJson.error_description || errJson.error || errJson.hint || errJson.message || errMsg;
                   } catch {
                     if (errText && errText.length < 200) errMsg = errText;
                   }
@@ -576,6 +585,8 @@
           // This must exactly match the Redirect URI registered in the Kick developer portal.
           const redirectUri = getOAuthRedirectUri();
 
+          console.log('[OAuth] Starting PKCE flow. redirect_uri:', redirectUri);
+
           // Store PKCE state in localStorage so it survives the full-page redirect to Kick
           localStorage.setItem('pkce_verifier',      codeVerifier);
           localStorage.setItem('oauth_state',        oauthState);
@@ -583,11 +594,11 @@
 
           const url = 'https://id.kick.com/oauth/authorize'
             + '?response_type=code'
-            + '&client_id='             + KICK_CLIENT_ID
+            + '&client_id='             + encodeURIComponent(KICK_CLIENT_ID)
             + '&redirect_uri='          + encodeURIComponent(redirectUri)
-            + '&scope=user%3Aread%20chat%3Awrite'
-            + '&state='                 + oauthState
-            + '&code_challenge='        + codeChallenge
+            + '&scope='                 + encodeURIComponent('user:read chat:write')
+            + '&state='                 + encodeURIComponent(oauthState)
+            + '&code_challenge='        + encodeURIComponent(codeChallenge)
             + '&code_challenge_method=S256';
 
           // Full-page redirect (standard PKCE flow for SPAs — no popup needed)
