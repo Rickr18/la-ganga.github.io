@@ -172,6 +172,16 @@
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
     }
 
+    // Returns the canonical redirect URI for this app.
+    // Strips trailing index.html and ensures a trailing slash so the URI is
+    // identical regardless of how the URL was accessed (with or without index.html).
+    // This value MUST be registered in the Kick developer portal as the Redirect URI.
+    function getOAuthRedirectUri() {
+      let pathname = window.location.pathname.replace(/\/index\.html$/, '');
+      if (!pathname.endsWith('/')) pathname += '/';
+      return window.location.origin + pathname;
+    }
+
     /* ═══════════════════════════════════════════════════════
        STATE MANAGEMENT
     ═══════════════════════════════════════════════════════ */
@@ -318,79 +328,36 @@
         document.title = state.pageTitle || 'La Ganga – Dashboard';
       }, [state.pageTitle]);
 
-      // Handle OAuth2 callback: supports both PKCE (code in query params) and
-      // legacy implicit grant (token in URL hash).
-      // If loaded inside a popup (window.opener present), notify the parent
-      // via postMessage and close the popup.
+      // Handle OAuth2 callback: supports PKCE full-page redirect (code in query params)
+      // and legacy implicit grant (token in URL hash).
       useEffect(() => {
-        // PKCE flow: authorization code returned as ?code=XXX&state=YYY
+        // PKCE flow: authorization code returned as ?code=XXX&state=YYY after full-page redirect
         const searchParams = new URLSearchParams(window.location.search);
-        const code = searchParams.get('code');
+        const code       = searchParams.get('code');
         const stateParam = searchParams.get('state');
         if (code) {
+          // Clean the URL immediately so the code is not visible or reused on refresh
           history.replaceState(null, '', window.location.pathname);
-          if (window.opener && !window.opener.closed) {
-            try {
-              window.opener.postMessage(
-                { type: 'kick_oauth_code', code, state: stateParam },
-                window.location.origin
-              );
-            } catch {}
-            window.close();
+
+          const savedState  = localStorage.getItem('oauth_state');
+          const verifier    = localStorage.getItem('pkce_verifier');
+          const redirectUri = localStorage.getItem('oauth_redirect_uri') || getOAuthRedirectUri();
+          localStorage.removeItem('pkce_verifier');
+          localStorage.removeItem('oauth_state');
+          localStorage.removeItem('oauth_redirect_uri');
+
+          if (savedState && stateParam !== savedState) {
+            setTimeout(() => showToast('⚠️ Error de seguridad OAuth (state mismatch)', '#ef4444'), 100);
             return;
           }
-        }
-
-        // Legacy implicit grant: access_token returned in URL hash
-        const hash = window.location.hash;
-        if (!hash) return;
-        const params = new URLSearchParams(hash.slice(1));
-        const token = params.get('access_token');
-        const expiresIn = parseInt(params.get('expires_in') || '0', 10);
-        if (token) {
-          const expiry = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
-          localStorage.setItem('kick_token', token);
-          history.replaceState(null, '', window.location.pathname + window.location.search);
-          if (window.opener && !window.opener.closed) {
-            try {
-              window.opener.postMessage(
-                { type: 'kick_oauth_token', token, expiry },
-                window.location.origin
-              );
-            } catch {}
-            window.close();
+          if (!verifier) {
+            setTimeout(() => showToast('⚠️ Error en flujo OAuth: verifier no encontrado', '#ef4444'), 100);
             return;
           }
-          setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
-          setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
-        }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, []);
 
-      // Listen for the OAuth message sent by the popup.
-      // Handles both PKCE code exchange and legacy implicit-grant token.
-      useEffect(() => {
-        async function onMessage(e) {
-          if (e.origin !== window.location.origin) return;
-
-          // PKCE flow: popup sends us the authorization code
-          if (e.data && e.data.type === 'kick_oauth_code') {
-            const { code, state: returnedState } = e.data;
-            const savedState   = sessionStorage.getItem('oauth_state');
-            const verifier     = sessionStorage.getItem('pkce_verifier');
-            sessionStorage.removeItem('pkce_verifier');
-            sessionStorage.removeItem('oauth_state');
-
-            if (savedState && returnedState !== savedState) {
-              showToast('⚠️ Error de seguridad OAuth (state mismatch)', '#ef4444');
-              return;
-            }
-            if (!verifier || !code) {
-              showToast('⚠️ Error en flujo OAuth: faltan parámetros', '#ef4444');
-              return;
-            }
+          // Exchange authorization code for access token (PKCE)
+          (async () => {
             try {
-              const redirectUri = window.location.origin + window.location.pathname;
               const body = new URLSearchParams({
                 grant_type:    'authorization_code',
                 code,
@@ -400,12 +367,24 @@
               });
               const res = await fetch('https://id.kick.com/oauth/token', {
                 method:  'POST',
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                body:    body.toString(),
+                headers: {
+                  'Content-Type': 'application/x-www-form-urlencoded',
+                  'Accept':       'application/json',
+                },
+                body: body.toString(),
               });
               if (!res.ok) {
-                const err = await res.json().catch(() => ({ error: 'Unknown error' }));
-                showToast(`⚠️ Error OAuth: ${err.error_description || err.error || res.status}`, '#ef4444');
+                let errMsg = `HTTP ${res.status}`;
+                try {
+                  const errText = await res.text();
+                  try {
+                    const errJson = JSON.parse(errText);
+                    errMsg = errJson.error_description || errJson.error || errMsg;
+                  } catch {
+                    if (errText && errText.length < 200) errMsg = errText;
+                  }
+                } catch {}
+                setTimeout(() => showToast(`⚠️ Error OAuth: ${errMsg}`, '#ef4444'), 100);
                 return;
               }
               const data      = await res.json();
@@ -414,22 +393,28 @@
               const expiry    = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
               localStorage.setItem('kick_token', token);
               setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
-              showToast('✅ Conectado a Kick con OAuth2');
+              setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
             } catch {
-              showToast('⚠️ Error de red al obtener token OAuth', '#ef4444');
+              setTimeout(() => showToast('⚠️ Error de red al obtener token OAuth', '#ef4444'), 100);
             }
-            return;
-          }
-
-          // Legacy implicit-grant flow: popup sends the access token directly
-          if (e.data && e.data.type === 'kick_oauth_token') {
-            const { token, expiry } = e.data;
-            setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry || 0 }));
-            showToast('✅ Conectado a Kick con OAuth2');
-          }
+          })();
+          return;
         }
-        window.addEventListener('message', onMessage);
-        return () => window.removeEventListener('message', onMessage);
+
+        // Legacy implicit grant: access_token returned in URL hash
+        const hash = window.location.hash;
+        if (!hash) return;
+        const params    = new URLSearchParams(hash.slice(1));
+        const token     = params.get('access_token');
+        const expiresIn = parseInt(params.get('expires_in') || '0', 10);
+        if (token) {
+          const expiry = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
+          localStorage.setItem('kick_token', token);
+          history.replaceState(null, '', window.location.pathname + window.location.search);
+          setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
+          setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
+        }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
       }, []);
 
       // fetch real Kick live status for all streamers
@@ -586,21 +571,27 @@
           const codeVerifier  = generateCodeVerifier();
           const codeChallenge = await generateCodeChallenge(codeVerifier);
           const oauthState    = generateCodeVerifier(); // random state for CSRF protection
-          sessionStorage.setItem('pkce_verifier', codeVerifier);
-          sessionStorage.setItem('oauth_state',   oauthState);
-          const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
-          const url = `https://id.kick.com/oauth/authorize`
-            + `?response_type=code`
-            + `&client_id=${KICK_CLIENT_ID}`
-            + `&redirect_uri=${redirectUri}`
-            + `&scope=user:read%20chat:write`
-            + `&state=${oauthState}`
-            + `&code_challenge=${codeChallenge}`
-            + `&code_challenge_method=S256`;
-          const popup = window.open(url, 'kick_oauth', 'width=520,height=680,scrollbars=yes,resizable=yes');
-          if (!popup) {
-            showToast('⚠️ Pop-up bloqueado. Habilítalo en tu navegador.', '#ef4444');
-          }
+
+          // Normalize redirect URI: strip trailing index.html, ensure trailing slash.
+          // This must exactly match the Redirect URI registered in the Kick developer portal.
+          const redirectUri = getOAuthRedirectUri();
+
+          // Store PKCE state in localStorage so it survives the full-page redirect to Kick
+          localStorage.setItem('pkce_verifier',      codeVerifier);
+          localStorage.setItem('oauth_state',        oauthState);
+          localStorage.setItem('oauth_redirect_uri', redirectUri);
+
+          const url = 'https://id.kick.com/oauth/authorize'
+            + '?response_type=code'
+            + '&client_id='             + KICK_CLIENT_ID
+            + '&redirect_uri='          + encodeURIComponent(redirectUri)
+            + '&scope=user%3Aread%20chat%3Awrite'
+            + '&state='                 + oauthState
+            + '&code_challenge='        + codeChallenge
+            + '&code_challenge_method=S256';
+
+          // Full-page redirect (standard PKCE flow for SPAs — no popup needed)
+          window.location.href = url;
         } catch {
           showToast('⚠️ Error al iniciar OAuth', '#ef4444');
         }
@@ -1385,17 +1376,6 @@
                   Chat
                 </span>
                 <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-                  <a
-                    href="https://kick.com/login"
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{
-                      fontSize:10, fontWeight:700, padding:'2px 7px', borderRadius:4,
-                      background:'rgba(83,252,24,.1)', border:'1px solid rgba(83,252,24,.3)',
-                      color:'var(--neon)', textDecoration:'none', flexShrink:0,
-                    }}
-                    title="Inicia sesión en Kick para poder chatear (se abre en nueva pestaña)"
-                  >🔑 Login</a>
                   <select
                     value={chatChannel}
                     onChange={e => setChatChannel(e.target.value)}
@@ -1839,12 +1819,17 @@
                   </div>
                   <div style={{ fontSize:11, color:'var(--muted)', lineHeight:1.7 }}>
                     <strong style={{ color:'var(--white)' }}>¿Cómo funciona?</strong><br/>
-                    Al hacer clic en "Conectar con Kick" se abrirá una ventana emergente (pop-up) al portal de
-                    autorización de Kick. Tras autorizar, el token se captura automáticamente, se guarda en
-                    localStorage y se usa en las peticiones a la API v2. No se necesita backend.
+                    Al hacer clic en "Conectar con Kick" serás redirigido al portal de autorización de Kick
+                    (OAuth 2.0 Authorization Code + PKCE). Tras autorizar, volverás aquí automáticamente
+                    y el token se guardará en localStorage. No se necesita backend.
                     <br/>
                     <strong style={{ color:'var(--yellow)' }}>✅ Client ID:</strong>{' '}
                     <code style={{ fontFamily:'monospace', color:'var(--neon)' }}>{KICK_CLIENT_ID}</code>
+                    <br/>
+                    <strong style={{ color:'var(--yellow)' }}>Redirect URI (registrar en Kick):</strong>{' '}
+                    <code style={{ fontFamily:'monospace', color:'var(--neon)', wordBreak:'break-all' }}>
+                      {getOAuthRedirectUri()}
+                    </code>
                     <br/>
                     <strong style={{ color:'var(--yellow)' }}>Scopes:</strong>{' '}
                     <code style={{ fontFamily:'monospace', color:'var(--muted2)' }}>user:read chat:write</code>
