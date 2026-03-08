@@ -103,6 +103,46 @@
       { id:'lonche',     name:'Lonche',   color:'#f97316', avatar:'🟠' },
     ];
 
+    // Fixed La Ganga crew tags (non-editable for base streamers)
+    const GANG_TAGS = {
+      'westcol':    'W Reals',
+      'willito':    'WAKA',
+      'lonche':     'FES',
+      'chanty':     'JP',
+      'samulx':     'PTG',
+      'lasapaaaaa': 'CDLS',
+    };
+
+    // Compute position/size of a cinema slot within the viewport
+    function getCinemaRect(index, total) {
+      const BAR = 44;
+      if (total === 1) return { top: BAR, left: 0, right: 0, bottom: 0 };
+      if (total === 2) return {
+        top: BAR, bottom: 0,
+        ...(index === 0 ? { left: 0, right: '50%' } : { left: '50%', right: 0 }),
+      };
+      // 3–4: 2-column grid
+      if (total <= 4) {
+        const COLS = 2, ROWS = Math.ceil(total / COLS);
+        const col = index % COLS, row = Math.floor(index / COLS);
+        return {
+          top:    `calc(${BAR}px + ${row} * (100vh - ${BAR}px) / ${ROWS})`,
+          left:   `${col * 50}%`,
+          width:  '50%',
+          height: `calc((100vh - ${BAR}px) / ${ROWS})`,
+        };
+      }
+      // 5–6: 3-column grid
+      const COLS = 3, ROWS = Math.ceil(total / COLS);
+      const col = index % COLS, row = Math.floor(index / COLS);
+      return {
+        top:    `calc(${BAR}px + ${row} * (100vh - ${BAR}px) / ${ROWS})`,
+        left:   `${Math.floor(col * 100 / COLS)}%`,
+        width:  `${Math.floor(100 / COLS)}%`,
+        height: `calc((100vh - ${BAR}px) / ${ROWS})`,
+      };
+    }
+
     const GRID_CLASSES = {
       1: { cols:'1fr',           rows:'1fr'      },
       2: { cols:'1fr 1fr',       rows:'1fr'      },
@@ -160,9 +200,12 @@
         const raw = localStorage.getItem(LS_KEY)
           || localStorage.getItem('laganga_v5')
           || localStorage.getItem('laganga_v4');
-        if (!raw) return defaultState;
+        const kickToken = localStorage.getItem('kick_token') || '';
+        if (!raw) return { ...defaultState, kickAccessToken: kickToken, streamers: DEFAULT_STREAMERS };
         const saved = JSON.parse(raw);
         const merged = { ...defaultState, ...saved };
+        // Sync kick_token from dedicated localStorage key if not in main storage
+        if (!merged.kickAccessToken && kickToken) merged.kickAccessToken = kickToken;
         if (Array.isArray(merged.streamers) && merged.streamers.length > 0) {
           // Remove legacy "leandro" entry and fix name for "lasapaaaaa"
           merged.streamers = merged.streamers
@@ -261,7 +304,8 @@
     function AppProvider({ children }) {
       const [state, setState] = useState(() => loadState());
       const [toast, setToast] = useState({ msg:'', color:'', show:false });
-      const [cinemaId, setCinemaId] = useState(null);
+      const [cinemaIds, setCinemaIds] = useState([]);
+      const [muteAll, setMuteAll] = useState(false);
       const [showAdmin, setShowAdmin] = useState(false);
       const [showDiscord, setShowDiscord] = useState(false);
       const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -287,6 +331,7 @@
         if (token) {
           const expiry = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
           setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
+          localStorage.setItem('kick_token', token);
           // Clean the hash from the URL without reloading
           history.replaceState(null, '', window.location.pathname + window.location.search);
           // Will show toast after state update; use setTimeout to avoid render-phase side effect
@@ -356,8 +401,17 @@
       function closeChat() { setState(s => ({ ...s, chatOpen: false })); }
       function setChatChannel(ch) { setState(s => ({ ...s, chatChannel: ch })); }
 
-      function enterCinema(id) { setCinemaId(id); }
-      function exitCinema()    { setCinemaId(null); }
+      function enterCinema(id) {
+        setCinemaIds(prev => prev.includes(id) ? prev : [...prev, id]);
+      }
+      function exitCinema(id) {
+        if (id) setCinemaIds(prev => prev.filter(x => x !== id));
+        else    setCinemaIds([]);
+      }
+      function toggleCinema(id) {
+        setCinemaIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
+      }
+      function toggleMuteAll() { setMuteAll(v => !v); }
 
       function updateState(partial) { setState(s => ({ ...s, ...partial })); }
       function addStreamer(streamer) {
@@ -443,6 +497,7 @@
 
       function disconnectKickOAuth() {
         setState(s => ({ ...s, kickAccessToken: '', kickTokenExpiry: 0 }));
+        localStorage.removeItem('kick_token');
         showToast('Desconectado de Kick OAuth');
       }
 
@@ -450,7 +505,8 @@
         state, updateState,
         addStream, removeStream, toggleStream, clearStreams,
         openChat, closeChat, setChatChannel,
-        cinemaId, enterCinema, exitCinema,
+        cinemaIds, enterCinema, exitCinema, toggleCinema,
+        muteAll, toggleMuteAll,
         showAdmin, setShowAdmin,
         showDiscord, setShowDiscord,
         sidebarOpen, setSidebarOpen,
@@ -636,7 +692,8 @@
     ═══════════════════════════════════════════════════════ */
     function Header() {
       const { state, toggleStream, clearStreams, openChat, sidebarOpen, setSidebarOpen,
-              setShowDiscord, setShowAdmin, refreshStatuses, apiLoading } = useApp();
+              setShowDiscord, setShowAdmin, refreshStatuses, apiLoading,
+              muteAll, toggleMuteAll } = useApp();
       const [customInput, setCustomInput] = useState('');
       const isMobile = useIsMobile();
 
@@ -705,6 +762,13 @@
             {!isMobile && <LatencyPill />}
             <button style={S.iconBtn(apiLoading)} onClick={refreshStatuses} title="Actualizar estados">
               <Icon.Refresh />
+            </button>
+            <button
+              style={{ ...S.iconBtn(muteAll), color: muteAll ? 'var(--red)' : 'var(--muted2)' }}
+              onClick={toggleMuteAll}
+              title={muteAll ? 'Quitar silencio global' : 'Silenciar todo'}
+            >
+              <span style={{ fontSize:16 }}>{muteAll ? '🔇' : '🔊'}</span>
             </button>
             <button style={S.iconBtn(false)} onClick={() => openChat()} title="Chat">
               <Icon.Chat />
@@ -799,8 +863,15 @@
                 >
                   <span style={{ fontSize:18, flexShrink:0, lineHeight:1 }}>{s.avatar}</span>
                   <div style={{ flex:1, minWidth:0 }}>
-                    <div style={{ fontSize:13, fontWeight:700, color: on ? s.color : 'var(--white)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis', marginBottom:2 }}>
-                      {s.name}
+                    <div style={{ display:'flex', alignItems:'center', gap:5, marginBottom:2 }}>
+                      <span style={{ fontSize:13, fontWeight:700, color: on ? s.color : 'var(--white)', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>
+                        {s.name}
+                      </span>
+                      {GANG_TAGS[s.id] && (
+                        <span style={{ fontSize:9, fontWeight:700, color:'var(--muted)', letterSpacing:'.06em', textTransform:'uppercase', flexShrink:0 }}>
+                          {GANG_TAGS[s.id]}
+                        </span>
+                      )}
                     </div>
                     <div style={{ fontSize:10, color:'var(--muted)', display:'flex', alignItems:'center', gap:4 }}>
                       {st && st.error ? (
@@ -849,11 +920,15 @@
        STREAM CELL
     ═══════════════════════════════════════════════════════ */
     function StreamCell({ channelId }) {
-      const { state, removeStream, enterCinema, statusMap, showToast } = useApp();
+      const { state, removeStream, toggleCinema, cinemaIds, statusMap, showToast, muteAll } = useApp();
       const [hovered, setHovered] = useState(false);
       const iframeRef = useRef(null);
       const prevOnlineRef = useRef(null);
       const s = state.streamers.find(x => x.id === channelId);
+
+      const cinemaIndex = cinemaIds.indexOf(channelId);
+      const isCinema    = cinemaIndex >= 0;
+      const totalCinema = cinemaIds.length;
 
       // Auto-reload iframe when stream goes from offline → online
       useEffect(() => {
@@ -868,58 +943,105 @@
         if (isOnline !== undefined) prevOnlineRef.current = isOnline;
       }, [statusMap, channelId, s, showToast]);
 
+      // The inner div moves to position:fixed in cinema mode.
+      // The OUTER div stays in the CSS grid as a placeholder.
+      // The iframe is always in the same React tree position → NEVER recreated → no audio duplication.
+      const innerStyle = isCinema ? {
+        position: 'fixed',
+        zIndex: 9994,
+        background: 'var(--black)',
+        overflow: 'hidden',
+        ...getCinemaRect(cinemaIndex, totalCinema),
+      } : {
+        position: 'absolute',
+        inset: 0,
+      };
+
+      const iframeSrc = muteAll
+        ? `${KICK_PLAYER(channelId)}?muted=1`
+        : KICK_PLAYER(channelId);
+
       return (
-        <div
-          style={{ position:'relative', background:'var(--black)', overflow:'hidden' }}
-          onMouseEnter={() => setHovered(true)}
-          onMouseLeave={() => setHovered(false)}
-        >
-          <iframe
-            ref={iframeRef}
-            src={KICK_PLAYER(channelId)}
-            allowFullScreen
-            scrolling="no"
-            style={{ width:'100%', height:'100%', display:'block', border:'none' }}
-            title={`Stream de ${s?.name || channelId}`}
-          />
-          {/* Overlay controls */}
-          <div style={{
-            position:'absolute', top:8, right:8,
-            display:'flex', gap:4, padding:'4px 6px',
-            background:'rgba(0,0,0,.75)', borderRadius:7,
-            opacity: hovered ? 1 : 0, transition:'opacity .15s',
-          }}>
-            <button
-              onClick={() => enterCinema(channelId)}
-              style={{
-                fontSize:11, padding:'3px 7px', borderRadius:5, color:'var(--white)',
-                background:'none', border:'1px solid rgba(255,255,255,.2)', cursor:'pointer',
-                transition:'color .12s, border-color .12s',
-              }}
-              title="Modo Cine"
-            >
-              🎬 Cine
-            </button>
-            <button
-              onClick={() => removeStream(channelId)}
-              style={{
-                fontSize:11, padding:'3px 7px', borderRadius:5, color:'var(--white)',
-                background:'none', border:'1px solid rgba(255,255,255,.2)', cursor:'pointer',
-                transition:'color .12s, border-color .12s',
-              }}
-              title="Cerrar stream"
-            >
-              ✕
-            </button>
-          </div>
-          {/* Channel label */}
-          <div style={{
-            position:'absolute', bottom:8, left:8,
-            background:'rgba(0,0,0,.7)', borderRadius:5, padding:'2px 7px',
-            fontSize:11, fontWeight:700, color: s?.color || 'var(--neon)',
-            opacity: hovered ? 1 : 0, transition:'opacity .15s',
-          }}>
-            {s?.avatar} {s?.name || channelId}
+        // Outer: stays in the CSS grid (visible as placeholder when in cinema mode)
+        <div style={{
+          position: 'relative', background: isCinema ? 'var(--darker)' : 'var(--black)',
+          overflow: 'hidden',
+          border: isCinema ? '1px dashed rgba(83,252,24,.18)' : 'none',
+        }}>
+          {/* Placeholder indicator while stream is in cinema mode */}
+          {isCinema && (
+            <div style={{
+              position: 'absolute', inset: 0,
+              display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+              gap: 5, pointerEvents: 'none',
+            }}>
+              <span style={{ fontSize: 24 }}>🎬</span>
+              <span style={{ fontSize: 10, color: 'rgba(83,252,24,.45)', fontWeight: 700 }}>EN MODO CINE</span>
+            </div>
+          )}
+          {/* Inner: position:fixed in cinema mode (iframe reused, not recreated) */}
+          <div
+            style={innerStyle}
+            onMouseEnter={() => setHovered(true)}
+            onMouseLeave={() => setHovered(false)}
+          >
+            <iframe
+              ref={iframeRef}
+              src={iframeSrc}
+              allowFullScreen
+              scrolling="no"
+              style={{ width:'100%', height:'100%', display:'block', border:'none' }}
+              title={`Stream de ${s?.name || channelId}`}
+            />
+            {/* Mute indicator */}
+            {muteAll && (
+              <div style={{
+                position:'absolute', top:6, left:6, zIndex:2,
+                background:'rgba(0,0,0,.75)', borderRadius:4, padding:'2px 6px',
+                fontSize:11, color:'var(--muted)',
+              }}>🔇</div>
+            )}
+            {/* Overlay controls */}
+            <div style={{
+              position:'absolute', top:8, right:8,
+              display:'flex', gap:4, padding:'4px 6px',
+              background:'rgba(0,0,0,.75)', borderRadius:7,
+              opacity: hovered ? 1 : 0, transition:'opacity .15s', zIndex:2,
+            }}>
+              <button
+                onClick={() => toggleCinema(channelId)}
+                style={{
+                  fontSize:11, padding:'3px 7px', borderRadius:5,
+                  color: isCinema ? 'var(--neon)' : 'var(--white)',
+                  background: isCinema ? 'rgba(83,252,24,.2)' : 'none',
+                  border:`1px solid ${isCinema ? 'rgba(83,252,24,.4)' : 'rgba(255,255,255,.2)'}`,
+                  cursor:'pointer',
+                }}
+                title={isCinema ? 'Salir del Modo Cine' : 'Modo Cine'}
+              >
+                {isCinema ? '⊡ Normal' : '🎬 Cine'}
+              </button>
+              <button
+                onClick={() => removeStream(channelId)}
+                style={{
+                  fontSize:11, padding:'3px 7px', borderRadius:5, color:'var(--white)',
+                  background:'none', border:'1px solid rgba(255,255,255,.2)', cursor:'pointer',
+                }}
+                title="Cerrar stream"
+              >✕</button>
+            </div>
+            {/* Channel label */}
+            <div style={{
+              position:'absolute', bottom:8, left:8,
+              background:'rgba(0,0,0,.7)', borderRadius:5, padding:'2px 7px',
+              fontSize:11, fontWeight:700, color: s?.color || 'var(--neon)',
+              opacity: hovered ? 1 : 0, transition:'opacity .15s', zIndex:2,
+            }}>
+              {s?.avatar} {s?.name || channelId}
+              {GANG_TAGS[channelId] && (
+                <span style={{ marginLeft:5, opacity:.65, fontSize:10 }}>[{GANG_TAGS[channelId]}]</span>
+              )}
+            </div>
           </div>
         </div>
       );
@@ -983,7 +1105,7 @@
        DASHBOARD STATS CARD
     ═══════════════════════════════════════════════════════ */
     function StatsCard({ streamer }) {
-      const { state, toggleStream, enterCinema, statusMap } = useApp();
+      const { state, toggleStream, toggleCinema, cinemaIds, statusMap } = useApp();
       const on   = state.active.includes(streamer.id);
       const st   = statusMap[streamer.id];
       const live = st && st.online;
@@ -1007,9 +1129,16 @@
           <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', gap:6 }}>
             <div style={{ display:'flex', alignItems:'center', gap:7 }}>
               <span style={{ fontSize:17, lineHeight:1 }}>{streamer.avatar}</span>
-              <span style={{ fontSize:14, fontWeight:700, color: on ? streamer.color : 'var(--white)' }}>
-                {streamer.name}
-              </span>
+              <div style={{ display:'flex', flexDirection:'column', gap:1 }}>
+                <span style={{ fontSize:14, fontWeight:700, color: on ? streamer.color : 'var(--white)' }}>
+                  {streamer.name}
+                </span>
+                {GANG_TAGS[streamer.id] && (
+                  <span style={{ fontSize:9, fontWeight:700, color:'var(--muted)', letterSpacing:'.07em', textTransform:'uppercase' }}>
+                    {GANG_TAGS[streamer.id]}
+                  </span>
+                )}
+              </div>
             </div>
             <LiveBadge online={live} error={st && st.error} />
           </div>
@@ -1071,13 +1200,15 @@
               {on ? '✕ Quitar' : '▶ Ver'}
             </button>
             <button
-              onClick={() => enterCinema(streamer.id)}
+              onClick={() => toggleCinema(streamer.id)}
               style={{
                 width:30, fontSize:13,
-                border:'1px solid var(--border)', borderRadius:6,
-                background:'none', cursor:'pointer',
+                border:`1px solid ${cinemaIds.includes(streamer.id) ? 'rgba(83,252,24,.4)' : 'var(--border)'}`,
+                borderRadius:6, cursor:'pointer',
+                background: cinemaIds.includes(streamer.id) ? 'rgba(83,252,24,.12)' : 'none',
+                color: cinemaIds.includes(streamer.id) ? 'var(--neon)' : 'inherit',
               }}
-              title="Modo Cine"
+              title={cinemaIds.includes(streamer.id) ? 'Salir del Modo Cine' : 'Modo Cine'}
             >🎬</button>
             <a
               href={KICK_LINK(streamer.id)}
@@ -1168,73 +1299,132 @@
     }
 
     /* ═══════════════════════════════════════════════════════
-       CINEMA / THEATER MODE
+       CINEMA BAR (Multi-Cinema Mode)
+       Renders only the top bar + optional chat panel.
+       The actual stream iframes stay in StreamCell (position:fixed),
+       so audio/video sessions are never interrupted.
     ═══════════════════════════════════════════════════════ */
-    function CinemaMode() {
-      const { state, cinemaId, exitCinema } = useApp();
+    function CinemaBar() {
+      const { state, cinemaIds, exitCinema } = useApp();
       const [showChat, setShowChat] = useState(false);
-      const s = state.streamers.find(x => x.id === cinemaId);
+      const [chatCh, setChatCh] = useState('');
+      const prevLenRef = useRef(0);
 
+      // Fullscreen + keyboard shortcut
       useEffect(() => {
         function onKey(e) { if (e.key === 'Escape') exitCinema(); }
-        if (cinemaId) {
+        if (cinemaIds.length > 0) {
           document.addEventListener('keydown', onKey);
-          document.documentElement.requestFullscreen?.().catch(() => {});
+          if (prevLenRef.current === 0) {
+            document.documentElement.requestFullscreen?.().catch(() => {});
+          }
+        } else {
+          document.exitFullscreen?.().catch(() => {});
         }
+        prevLenRef.current = cinemaIds.length;
         return () => document.removeEventListener('keydown', onKey);
-      }, [cinemaId]);
+      }, [cinemaIds]);
 
+      // Default chat channel when first stream enters cinema
       useEffect(() => {
-        setShowChat(false);
-      }, [cinemaId]);
+        if (cinemaIds.length > 0 && !chatCh) setChatCh(cinemaIds[0]);
+        if (cinemaIds.length === 0) { setShowChat(false); setChatCh(''); }
+      }, [cinemaIds]);
 
-      if (!cinemaId) return null;
+      if (cinemaIds.length === 0) return null;
+
+      const CHAT_W = 290;
 
       return (
-        <div style={{
-          position:'fixed', inset:0, zIndex:9999,
-          background:'var(--black)', display:'flex', flexDirection:'column',
-        }}>
-          {/* Bar */}
+        <>
+          {/* Dark backdrop covering the normal grid below the cinema streams */}
           <div style={{
-            display:'flex', alignItems:'center', justifyContent:'space-between',
-            padding:'6px 14px', background:'#000', borderBottom:'1px solid var(--border)',
-            flexShrink:0, gap:10,
+            position:'fixed', top:44, left:0, right: showChat ? CHAT_W : 0, bottom:0,
+            zIndex:9990, background:'var(--black)', pointerEvents:'none',
+          }} />
+
+          {/* Top bar */}
+          <div style={{
+            position:'fixed', top:0, left:0, right:0, height:44,
+            zIndex:9999, background:'#000', borderBottom:'1px solid var(--border)',
+            display:'flex', alignItems:'center', gap:8, padding:'0 14px', flexShrink:0,
           }}>
-            <span style={{ fontSize:12, fontWeight:700, color:'var(--neon)' }} className="glow">🎬 MODO CINE</span>
-            <span style={{ fontSize:12, color:'var(--muted)' }}>{s ? `${s.avatar} ${s.name}` : cinemaId}</span>
-            <div style={{ display:'flex', gap:8, marginLeft:'auto' }}>
+            <span style={{ fontSize:12, fontWeight:700, color:'var(--neon)', flexShrink:0 }} className="glow">
+              🎬 MULTI-CINE
+            </span>
+            {/* Stream chips — click to remove from cinema */}
+            <div style={{ display:'flex', gap:5, flex:1, overflow:'hidden', flexWrap:'nowrap' }}>
+              {cinemaIds.map(id => {
+                const s = state.streamers.find(x => x.id === id);
+                return (
+                  <button
+                    key={id}
+                    onClick={() => exitCinema(id)}
+                    style={{
+                      display:'flex', alignItems:'center', gap:5,
+                      padding:'3px 9px', borderRadius:5, fontSize:11, fontWeight:600,
+                      background:'rgba(83,252,24,.1)', border:'1px solid rgba(83,252,24,.3)',
+                      color:'var(--neon)', cursor:'pointer', flexShrink:0,
+                    }}
+                    title="Quitar del modo cine"
+                  >
+                    {s?.avatar} {s?.name || id} ✕
+                    {GANG_TAGS[id] && <span style={{ opacity:.65, fontSize:10 }}>[{GANG_TAGS[id]}]</span>}
+                  </button>
+                );
+              })}
+            </div>
+            <div style={{ display:'flex', gap:6, marginLeft:'auto', flexShrink:0 }}>
               <button
-                onClick={() => { setShowChat(v => !v); }}
+                onClick={() => setShowChat(v => !v)}
                 style={S.btnOutline(showChat ? 'var(--neon)' : undefined)}
               >
-                {showChat ? 'Ocultar chat' : 'Mostrar chat'}
+                {showChat ? 'Ocultar chat' : 'Chat'}
               </button>
               <button
                 onClick={() => { exitCinema(); document.exitFullscreen?.().catch(() => {}); }}
-                style={{ ...S.btnOutline('var(--neon)') }}
+                style={S.btnOutline('var(--neon)')}
               >
                 Salir (Esc)
               </button>
             </div>
           </div>
-          {/* Content */}
-          <div style={{ display:'flex', flex:1, overflow:'hidden', minHeight:0 }}>
-            <iframe
-              src={KICK_PLAYER(cinemaId)}
-              allowFullScreen
-              style={{ flex:1, height:'100%', border:'none' }}
-              title={`Modo cine – ${cinemaId}`}
-            />
-            {showChat && (
+
+          {/* Chat panel — fixed on the right */}
+          {showChat && (
+            <div style={{
+              position:'fixed', top:44, right:0, width:CHAT_W, bottom:0,
+              zIndex:9999, background:'var(--black)', borderLeft:'1px solid var(--border)',
+              display:'flex', flexDirection:'column',
+            }}>
+              <div style={{
+                padding:'6px 10px', borderBottom:'1px solid var(--border)', flexShrink:0,
+                display:'flex', alignItems:'center', gap:6,
+              }}>
+                <span style={{ fontSize:10, fontWeight:700, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'.1em' }}>Chat</span>
+                <select
+                  value={chatCh}
+                  onChange={e => setChatCh(e.target.value)}
+                  style={{
+                    background:'var(--border)', border:'none', borderRadius:5,
+                    color:'var(--white)', fontSize:11, padding:'2px 6px', cursor:'pointer',
+                    outline:'none', flex:1,
+                  }}
+                >
+                  {cinemaIds.map(id => {
+                    const s = state.streamers.find(x => x.id === id);
+                    return <option key={id} value={id}>{s ? s.name : id}</option>;
+                  })}
+                </select>
+              </div>
               <iframe
-                src={KICK_CHAT(cinemaId)}
-                style={{ width:290, flexShrink:0, border:'none', borderLeft:'1px solid var(--border)' }}
-                title="Chat cine"
+                src={chatCh ? KICK_CHAT(chatCh) : ''}
+                style={{ flex:1, width:'100%', border:'none' }}
+                title="Chat modo cine"
               />
-            )}
-          </div>
-        </div>
+            </div>
+          )}
+        </>
       );
     }
 
@@ -1666,7 +1856,7 @@
             </div>
           )}
 
-          <CinemaMode />
+          <CinemaBar />
           {showDiscord && <DiscordModal />}
           {showAdmin   && <AdminPanel />}
           <Toast />
