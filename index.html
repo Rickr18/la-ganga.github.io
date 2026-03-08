@@ -67,18 +67,6 @@
     const KICK_CHAT   = id => `https://kick.com/${id}/chatroom`;
     const KICK_LINK   = id => `https://kick.com/${id}`;
 
-    // Kick OAuth2 – Client ID (implicit / token flow, no secret needed on the frontend)
-    const KICK_CLIENT_ID  = '01KK5HRDE7D8XP14D70CYRH407';
-    // Fixed redirect URI – must be registered exactly as-is in the Kick developer portal.
-    // Using a constant avoids mismatches caused by dynamic computation (origin, pathname, etc.).
-    const KICK_REDIRECT_URI = 'https://rickr18.github.io/la-ganga.github.io/';
-    // Client secret injected at build time by GitHub Actions (see .github/workflows/deploy.yml).
-    // The source file stores only the placeholder; the real secret is kept in a GitHub Secret
-    // and is never committed to the repository.
-    const KICK_CLIENT_SECRET = '__KICK_CLIENT_SECRET__';
-    // App name shown in the "connected" badge (matches the registered Kick app)
-    const KICK_APP_NAME   = 'laganga';
-
     // Leandro = La Sapa. Su canal en Kick es "lasapaaaaa"
     const DEFAULT_STREAMERS = [
       { id:'westcol',    name:'Westcol',  color:'#53fc18', avatar:'🟢' },
@@ -162,34 +150,6 @@
     }
 
     /* ═══════════════════════════════════════════════════════
-       PKCE HELPERS (OAuth 2.0 Authorization Code + PKCE)
-    ═══════════════════════════════════════════════════════ */
-    function generateCodeVerifier() {
-      const array = new Uint8Array(32);
-      crypto.getRandomValues(array);
-      return btoa(Array.from(array, b => String.fromCharCode(b)).join(''))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    }
-
-    async function generateCodeChallenge(verifier) {
-      const encoder = new TextEncoder();
-      const data = encoder.encode(verifier);
-      const digest = await crypto.subtle.digest('SHA-256', data);
-      return btoa(Array.from(new Uint8Array(digest), b => String.fromCharCode(b)).join(''))
-        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-    }
-
-    // Returns the canonical redirect URI for this app.
-    // Strips trailing index.html and ensures a trailing slash so the URI is
-    // identical regardless of how the URL was accessed (with or without index.html).
-    // This value MUST be registered in the Kick developer portal as the Redirect URI.
-    function getOAuthRedirectUri() {
-      let pathname = window.location.pathname.replace(/\/index\.html$/, '');
-      if (!pathname.endsWith('/')) pathname += '/';
-      return window.location.origin + pathname;
-    }
-
-    /* ═══════════════════════════════════════════════════════
        STATE MANAGEMENT
     ═══════════════════════════════════════════════════════ */
     const defaultState = {
@@ -203,8 +163,6 @@
       logoText:        'LA GANGA',
       subtitle:        'Multi-Stream Dashboard',
       pageTitle:       'La Ganga – Multi-Stream Dashboard',
-      kickAccessToken: '',
-      kickTokenExpiry: 0,
       milestoneGoal:   10000,
     };
 
@@ -214,12 +172,12 @@
         const raw = localStorage.getItem(LS_KEY)
           || localStorage.getItem('laganga_v5')
           || localStorage.getItem('laganga_v4');
-        const kickToken = localStorage.getItem('kick_token') || '';
-        if (!raw) return { ...defaultState, kickAccessToken: kickToken, streamers: DEFAULT_STREAMERS };
+        if (!raw) return { ...defaultState, streamers: DEFAULT_STREAMERS };
         const saved = JSON.parse(raw);
         const merged = { ...defaultState, ...saved };
-        // Sync kick_token from dedicated localStorage key if not in main storage
-        if (!merged.kickAccessToken && kickToken) merged.kickAccessToken = kickToken;
+        // Remove legacy OAuth fields if present
+        delete merged.kickAccessToken;
+        delete merged.kickTokenExpiry;
         if (Array.isArray(merged.streamers) && merged.streamers.length > 0) {
           // Remove legacy "leandro" entry and fix name for "lasapaaaaa"
           merged.streamers = merged.streamers
@@ -255,12 +213,10 @@
       } catch { return ''; }
     }
 
-    async function fetchStreamData(channelName, accessToken) {
-      // Try official API v2 first (with or without token)
+    async function fetchStreamData(channelName) {
+      // Try official API v2 first (public endpoint, no token required)
       try {
-        const headers = { Accept: 'application/json' };
-        if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
-        const res = await fetch(KICK_API_V2(channelName), { headers, cache: 'no-store' });
+        const res = await fetch(KICK_API_V2(channelName), { headers: { Accept: 'application/json' }, cache: 'no-store' });
         if (res.ok) {
           const data = await res.json();
           // v2 returns { data: [ channelObject ] }
@@ -335,133 +291,16 @@
         document.title = state.pageTitle || 'La Ganga – Dashboard';
       }, [state.pageTitle]);
 
-      // Handle OAuth2 callback: supports PKCE full-page redirect (code in query params)
-      // and legacy implicit grant (token in URL hash).
-      useEffect(() => {
-        // PKCE flow: authorization code returned as ?code=XXX&state=YYY after full-page redirect
-        // Use regex + decodeURIComponent instead of URLSearchParams.get() to avoid
-        // misinterpreting '+' as a space (application/x-www-form-urlencoded parsing behaviour).
-        function getRawParam(search, name) {
-          const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const match = search.match(new RegExp('[?&]' + escaped + '=([^&#]*)'));
-          return match ? decodeURIComponent(match[1]) : null;
-        }
-        const code       = getRawParam(window.location.search, 'code');
-        const stateParam = getRawParam(window.location.search, 'state');
-        if (code) {
-          // Clean the URL immediately so the code is not visible or reused on refresh
-          history.replaceState(null, '', window.location.pathname);
-
-          const savedState  = localStorage.getItem('oauth_state');
-          const verifier    = localStorage.getItem('pkce_verifier');
-          const redirectUri = localStorage.getItem('oauth_redirect_uri') || KICK_REDIRECT_URI;
-          localStorage.removeItem('pkce_verifier');
-          localStorage.removeItem('oauth_state');
-          localStorage.removeItem('oauth_redirect_uri');
-
-          console.log('[OAuth] Callback received. redirect_uri used for token exchange:', redirectUri);
-
-          if (savedState && stateParam !== savedState) {
-            console.error('[OAuth] State mismatch. Expected:', savedState, 'Got:', stateParam);
-            setTimeout(() => showToast('⚠️ Error de seguridad OAuth (state mismatch)', '#ef4444'), 100);
-            return;
-          }
-          if (!verifier || verifier.length < 43) {
-            // RFC 7636 §4.1 requires code_verifier to be 43–128 characters.
-            console.error('[OAuth] pkce_verifier missing or too short. Length:', verifier ? verifier.length : 0);
-            setTimeout(() => showToast('⚠️ Error en flujo OAuth: verifier inválido', '#ef4444'), 100);
-            return;
-          }
-
-          // Exchange authorization code for access token (PKCE)
-          (async () => {
-            try {
-              const body = new URLSearchParams({
-                grant_type:    'authorization_code',
-                code,
-                client_id:     KICK_CLIENT_ID,
-                code_verifier: verifier,
-                redirect_uri:  redirectUri,
-              });
-              // Include client_secret only when it has been injected at build time
-              // (i.e., it is not the raw placeholder that ships in the source).
-              // Treat the value as absent when it still contains the build placeholder
-              // (i.e., the GitHub Actions workflow was not run or the secret was not set).
-              const effectiveSecret = KICK_CLIENT_SECRET && !KICK_CLIENT_SECRET.startsWith('__') ? KICK_CLIENT_SECRET : '';
-              if (effectiveSecret) body.set('client_secret', effectiveSecret);
-
-              console.log('[OAuth] Sending token exchange. client_id:', KICK_CLIENT_ID,
-                '| redirect_uri:', redirectUri,
-                '| code_verifier length:', verifier.length,
-                '| client_secret present:', !!effectiveSecret);
-
-              const res = await fetch('https://id.kick.com/oauth/token', {
-                method:  'POST',
-                headers: {
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  'Accept':       'application/json',
-                },
-                body: body.toString(),
-              });
-              if (!res.ok) {
-                let errMsg = `HTTP ${res.status}`;
-                try {
-                  const errText = await res.text();
-                  console.error('[OAuth] Token exchange failed. Status:', res.status, 'Body:', errText);
-                  try {
-                    const errJson = JSON.parse(errText);
-                    errMsg = errJson.error_description || errJson.error || errJson.hint || errJson.message || errMsg;
-                  } catch {
-                    if (errText && errText.length < 200) errMsg = errText;
-                  }
-                } catch {}
-                setTimeout(() => showToast(`⚠️ Error OAuth ${res.status}: ${errMsg}`, '#ef4444'), 100);
-                return;
-              }
-              const data      = await res.json();
-              const token     = data.access_token;
-              const expiresIn = data.expires_in || 0;
-              const expiry    = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
-              localStorage.setItem('kick_token', token);
-              setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
-              setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
-            } catch (err) {
-              console.error('[OAuth] Network error during token exchange:', err);
-              setTimeout(() => showToast('⚠️ Error de red al obtener token OAuth', '#ef4444'), 100);
-            }
-          })();
-          return;
-        }
-
-        // Legacy implicit grant: access_token returned in URL hash
-        const hash = window.location.hash;
-        if (!hash) return;
-        const params    = new URLSearchParams(hash.slice(1));
-        const token     = params.get('access_token');
-        const expiresIn = parseInt(params.get('expires_in') || '0', 10);
-        if (token) {
-          const expiry = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
-          localStorage.setItem('kick_token', token);
-          history.replaceState(null, '', window.location.pathname + window.location.search);
-          setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
-          setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
-        }
-      // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, []);
-
       // fetch real Kick live status for all streamers
       const refreshStatuses = useCallback(async () => {
         if (!state.streamers || !state.streamers.length) return;
         setApiLoading(true);
-        // Use stored OAuth token if still valid
-        const token = (state.kickAccessToken && (!state.kickTokenExpiry || Date.now() < state.kickTokenExpiry))
-          ? state.kickAccessToken : '';
         const entries = await Promise.all(
-          state.streamers.map(async s => [s.id, await fetchStreamData(s.id, token)])
+          state.streamers.map(async s => [s.id, await fetchStreamData(s.id)])
         );
         setStatusMap(Object.fromEntries(entries));
         setApiLoading(false);
-      }, [state.streamers, state.kickAccessToken, state.kickTokenExpiry]);
+      }, [state.streamers]);
 
       useEffect(() => {
         refreshStatuses();
@@ -536,6 +375,11 @@
         localStorage.removeItem(LS_KEY);
         localStorage.removeItem('laganga_v5');
         localStorage.removeItem('laganga_v4');
+        // Clean up any legacy OAuth keys
+        localStorage.removeItem('kick_token');
+        localStorage.removeItem('pkce_verifier');
+        localStorage.removeItem('oauth_state');
+        localStorage.removeItem('oauth_redirect_uri');
         setState({ ...defaultState, streamers: DEFAULT_STREAMERS });
         showToast('Datos borrados. Recargando…', '#ef4444');
         setTimeout(() => window.location.reload(), 1500);
@@ -553,6 +397,18 @@
           setState(s => ({ ...s, ...data }));
           showToast('Configuración importada ✓');
         } catch { showToast('JSON inválido', '#ef4444'); }
+      }
+
+      function moveStreamer(id, direction) {
+        setState(s => {
+          const idx = s.streamers.findIndex(x => x.id === id);
+          if (idx < 0) return s;
+          const newList = [...s.streamers];
+          const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+          if (swapIdx < 0 || swapIdx >= newList.length) return s;
+          [newList[idx], newList[swapIdx]] = [newList[swapIdx], newList[idx]];
+          return { ...s, streamers: newList };
+        });
       }
 
       async function sendDiscordNotification(streamerId, online) {
@@ -598,46 +454,6 @@
         } catch { showToast('Error de red al probar webhook', '#ef4444'); }
       }
 
-      async function initiateKickOAuth() {
-        try {
-          const codeVerifier  = generateCodeVerifier();
-          const codeChallenge = await generateCodeChallenge(codeVerifier);
-          const oauthState    = generateCodeVerifier(); // random state for CSRF protection
-
-          // Use the fixed redirect URI constant to guarantee consistency between
-          // the authorize request and the token exchange.
-          const redirectUri = KICK_REDIRECT_URI;
-
-          console.log('[OAuth] Starting PKCE flow. redirect_uri:', redirectUri,
-            '| code_verifier length:', codeVerifier.length);
-
-          // Store PKCE state in localStorage so it survives the full-page redirect to Kick
-          localStorage.setItem('pkce_verifier',      codeVerifier);
-          localStorage.setItem('oauth_state',        oauthState);
-          localStorage.setItem('oauth_redirect_uri', redirectUri);
-
-          const url = 'https://id.kick.com/oauth/authorize'
-            + '?response_type=code'
-            + '&client_id='             + encodeURIComponent(KICK_CLIENT_ID)
-            + '&redirect_uri='          + encodeURIComponent(redirectUri)
-            + '&scope='                 + encodeURIComponent('user:read chat:write')
-            + '&state='                 + encodeURIComponent(oauthState)
-            + '&code_challenge='        + encodeURIComponent(codeChallenge)
-            + '&code_challenge_method=S256';
-
-          // Full-page redirect (standard PKCE flow for SPAs — no popup needed)
-          window.location.href = url;
-        } catch {
-          showToast('⚠️ Error al iniciar OAuth', '#ef4444');
-        }
-      }
-
-      function disconnectKickOAuth() {
-        setState(s => ({ ...s, kickAccessToken: '', kickTokenExpiry: 0 }));
-        localStorage.removeItem('kick_token');
-        showToast('Desconectado de Kick OAuth');
-      }
-
       const value = {
         state, updateState,
         addStream, removeStream, toggleStream, clearStreams,
@@ -650,10 +466,9 @@
         statusMap, apiLoading, refreshStatuses,
         toast,
         showToast,
-        addStreamer, removeStreamer, updateStreamer,
+        addStreamer, removeStreamer, updateStreamer, moveStreamer,
         resetStorage, exportConfig, importConfig,
         sendDiscordNotification, testWebhook,
-        initiateKickOAuth, disconnectKickOAuth,
       };
 
       return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
@@ -834,8 +649,6 @@
       const [customInput, setCustomInput] = useState('');
       const isMobile = useIsMobile();
 
-      const isKickConnected = !!(state.kickAccessToken && (!state.kickTokenExpiry || Date.now() < state.kickTokenExpiry));
-
       function handleAddCustom(e) {
         e.preventDefault();
         if (customInput.trim()) {
@@ -866,18 +679,6 @@
               </div>
               {!isMobile && <div style={{ fontSize:10, color:'var(--muted)', marginTop:1 }}>{state.subtitle || 'Multi-Stream Dashboard'}</div>}
             </div>
-            {/* "App Conectada" badge – shown when Kick OAuth token is valid */}
-            {isKickConnected && !isMobile && (
-              <div style={{
-                display:'flex', alignItems:'center', gap:5,
-                padding:'3px 9px', borderRadius:20, fontSize:10, fontWeight:700,
-                background:'rgba(34,197,94,.1)', border:'1px solid rgba(34,197,94,.3)',
-                color:'var(--live)', flexShrink:0,
-              }} title={`Conectado a la API de Kick como ${KICK_APP_NAME}`}>
-                <span style={{ width:6, height:6, borderRadius:'50%', background:'var(--live)', display:'inline-block' }} className="dot-live" />
-                App Conectada: {KICK_APP_NAME}
-              </div>
-            )}
           </div>
 
           {/* Center – quick streamer pills (desktop only) */}
@@ -1644,9 +1445,8 @@
        ADMIN PANEL
     ═══════════════════════════════════════════════════════ */
     function AdminPanel() {
-      const { state, updateState, setShowAdmin, addStreamer, removeStreamer, updateStreamer,
-              resetStorage, exportConfig, importConfig, testWebhook, showToast,
-              initiateKickOAuth, disconnectKickOAuth } = useApp();
+      const { state, updateState, setShowAdmin, addStreamer, removeStreamer, updateStreamer, moveStreamer,
+              resetStorage, exportConfig, importConfig, testWebhook, showToast } = useApp();
       const [newName, setNewName] = useState('');
       const [newId, setNewId]     = useState('');
       const [newColor, setNewColor] = useState('#53fc18');
@@ -1679,8 +1479,6 @@
         reader.onload = ev => importConfig(ev.target.result);
         reader.readAsText(file);
       }
-
-      const isKickConnected = !!(state.kickAccessToken && (!state.kickTokenExpiry || Date.now() < state.kickTokenExpiry));
 
       const tabs = [
         { id:'streamers',  label:'🎮 Streamers' },
@@ -1732,11 +1530,27 @@
                   <code style={{color:'var(--neon)', fontFamily:'monospace', marginLeft:5}}>lasapaaaaa</code>.
                 </p>
                 <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-                  {state.streamers.map(s => (
+                  {state.streamers.map((s, idx) => (
                     <div key={s.id} style={{
                       display:'flex', alignItems:'center', gap:8,
                       background:'rgba(255,255,255,.04)', borderRadius:9, padding:'9px 12px', border:'1px solid var(--border)',
                     }}>
+                      <div style={{ display:'flex', flexDirection:'column', gap:2, flexShrink:0 }}>
+                        <button
+                          onClick={() => moveStreamer(s.id, 'up')}
+                          disabled={idx === 0}
+                          style={{ fontSize:10, padding:'2px 5px', borderRadius:4, border:'1px solid var(--border)',
+                            background:'none', color: idx === 0 ? 'var(--border)' : 'var(--muted2)', cursor: idx === 0 ? 'default' : 'pointer' }}
+                          title="Mover arriba"
+                        >▲</button>
+                        <button
+                          onClick={() => moveStreamer(s.id, 'down')}
+                          disabled={idx === state.streamers.length - 1}
+                          style={{ fontSize:10, padding:'2px 5px', borderRadius:4, border:'1px solid var(--border)',
+                            background:'none', color: idx === state.streamers.length - 1 ? 'var(--border)' : 'var(--muted2)', cursor: idx === state.streamers.length - 1 ? 'default' : 'pointer' }}
+                          title="Mover abajo"
+                        >▼</button>
+                      </div>
                       <span style={{ fontSize:18, flexShrink:0 }}>{s.avatar}</span>
                       <input value={s.name} onChange={e => updateStreamer(s.id, { name: e.target.value })}
                         style={{ ...S.input, flex:1, padding:'5px 9px', fontSize:13 }} placeholder="Nombre" />
@@ -1808,9 +1622,6 @@
                       style={S.input}
                       placeholder="10000"
                     />
-                    <div style={{ fontSize:11, color:'var(--muted)', marginTop:5 }}>
-                      Requiere token OAuth de Kick para obtener datos de seguidores.
-                    </div>
                   </div>
                 </div>
               </section>
@@ -1819,58 +1630,6 @@
             {/* ADVANCED */}
             {activeTab==='advanced' && (
               <>
-                {/* OAuth2 section */}
-                <section style={sectionStyle}>
-                  <h2 style={h2Style}>🔑 Kick OAuth2</h2>
-                  <p style={pStyle}>
-                    Conecta con la API oficial de Kick v2 para obtener datos adicionales como el conteo de seguidores.
-                    El token se guarda en localStorage y persiste entre sesiones.
-                  </p>
-                  <div style={{
-                    display:'flex', alignItems:'center', gap:10, padding:'10px 14px',
-                    borderRadius:9, border:`1px solid ${isKickConnected ? 'rgba(34,197,94,.3)' : 'rgba(239,68,68,.3)'}`,
-                    background: isKickConnected ? 'rgba(34,197,94,.06)' : 'rgba(239,68,68,.06)',
-                    fontSize:13, fontWeight:600,
-                    color: isKickConnected ? 'var(--live)' : 'var(--red)',
-                  }}>
-                    <span style={{ fontSize:18 }}>{isKickConnected ? '✅' : '❌'}</span>
-                    <span>{isKickConnected ? `App Conectada: ${KICK_APP_NAME}` : 'Sin token OAuth'}</span>
-                  </div>
-                  <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
-                    <button
-                      onClick={initiateKickOAuth}
-                      style={{ ...S.btnNeon, display:'flex', alignItems:'center', gap:7 }}
-                    >
-                      🔑 Conectar con Kick
-                    </button>
-                    {isKickConnected && (
-                      <button
-                        onClick={disconnectKickOAuth}
-                        style={{ ...S.btnOutline('#ef4444'), color:'#ef4444' }}
-                      >
-                        Desconectar
-                      </button>
-                    )}
-                  </div>
-                  <div style={{ fontSize:11, color:'var(--muted)', lineHeight:1.7 }}>
-                    <strong style={{ color:'var(--white)' }}>¿Cómo funciona?</strong><br/>
-                    Al hacer clic en "Conectar con Kick" serás redirigido al portal de autorización de Kick
-                    (OAuth 2.0 Authorization Code + PKCE). Tras autorizar, volverás aquí automáticamente
-                    y el token se guardará en localStorage. No se necesita backend.
-                    <br/>
-                    <strong style={{ color:'var(--yellow)' }}>✅ Client ID:</strong>{' '}
-                    <code style={{ fontFamily:'monospace', color:'var(--neon)' }}>{KICK_CLIENT_ID}</code>
-                    <br/>
-                    <strong style={{ color:'var(--yellow)' }}>Redirect URI (registrar en Kick):</strong>{' '}
-                    <code style={{ fontFamily:'monospace', color:'var(--neon)', wordBreak:'break-all' }}>
-                      {KICK_REDIRECT_URI}
-                    </code>
-                    <br/>
-                    <strong style={{ color:'var(--yellow)' }}>Scopes:</strong>{' '}
-                    <code style={{ fontFamily:'monospace', color:'var(--muted2)' }}>user:read chat:write</code>
-                  </div>
-                </section>
-
                 <section style={sectionStyle}>
                   <h2 style={h2Style}>🔔 Webhook de Discord</h2>
                   <p style={pStyle}>
@@ -1892,8 +1651,7 @@
                 <section style={sectionStyle}>
                   <h2 style={h2Style}>🔗 Estado en tiempo real</h2>
                   <p style={pStyle}>
-                    El estado en vivo se obtiene preferentemente de la API oficial de Kick v2.
-                    Si no hay token OAuth2, se usa la API pública v1 como fallback.
+                    El estado en vivo se obtiene de la API pública oficial de Kick v2 con fallback a la API pública v1.
                     Se actualiza cada 45 segundos.
                   </p>
                   <div style={{ background:'rgba(83,252,24,.06)', border:'1px solid rgba(83,252,24,.15)',
