@@ -1,33 +1,29 @@
 # La-Ganga
 
-Multi-Stream Dashboard para Kick.
+Multi-Stream Dashboard para Kick. Proyecto **100% estático (Frontend)** desplegado en GitHub Pages.
 
-## Configuración de despliegue (GitHub Actions)
+## Descripción
 
-El `client_secret` de Kick **nunca se guarda en el código fuente**.  
-En su lugar se inyecta en el momento del despliegue mediante un secreto de GitHub Actions.
+Dashboard de multistreaming para seguir a los streamers de La Ganga en Kick simultáneamente.
+No requiere backend, servidor, ni autenticación. Todo funciona directamente en el navegador.
 
-### Pasos para configurar
+## Características
 
-1. Ve a **Settings → Secrets and variables → Actions** en este repositorio.
-2. Crea un nuevo secreto llamado exactamente `KICK_CLIENT_SECRET` y pega el valor de tu
-   client secret de Kick.
-3. En **Settings → Pages**, elige como fuente **GitHub Actions** en lugar de una rama.
-4. Cada vez que se haga `push` a `main`, el workflow `.github/workflows/deploy.yml`
-   reemplazará el marcador `__KICK_CLIENT_SECRET__` por el secreto real y publicará el
-   sitio en GitHub Pages.
+- **Multi-stream:** Ve hasta 6 streams de Kick al mismo tiempo.
+- **Modo Cine:** Expande uno o varios streams a pantalla completa sin interrumpir el audio.
+- **Chat en tiempo real:** Visualiza el chat oficial de Kick (solo lectura).
+- **Estado en vivo:** Muestra si cada streamer está conectado, cuántos espectadores tiene y qué juega.
+- **Silenciar todo:** Botón global para silenciar todos los streams con un clic.
+- **Notificaciones Discord:** Configura un webhook para recibir alertas cuando un streamer se conecta.
 
-> **Importante:** el secreto nunca queda visible en el código fuente ni en el historial de git.
-> El archivo HTML que se publica (artefacto de Actions) contiene el valor real, pero ese
-> artefacto no se sube al repositorio.
+## Despliegue
 
-## OAuth2 con Kick (PKCE)
+El sitio se publica automáticamente en GitHub Pages desde la rama `main`.
+No se requiere ninguna configuración adicional ni secretos.
 
-El flujo de autenticación usa **Authorization Code + PKCE** (sin backend requerido).  
-El `client_secret` se incluye en el intercambio de código solo si fue inyectado por el
-workflow; de lo contrario se omite automáticamente.
+## Tecnologías
 
-**Redirect URI que debes registrar en el portal de Kick:**
-```
-https://<tu-usuario>.github.io/<nombre-del-repo>/
-```
+- HTML5
+- CSS con variables nativas
+- JavaScript (React 18 via CDN + Babel Standalone)
+- API pública de Kick (sin autenticación)

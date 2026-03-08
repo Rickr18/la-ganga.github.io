@@ -165,6 +165,7 @@
       logoText:        'LA GANGA',
       subtitle:        'Multi-Stream Dashboard',
       pageTitle:       'La Ganga – Multi-Stream Dashboard',
+      muteAll:         false,
     };
 
     function loadState() {
@@ -450,6 +451,10 @@
         } catch { showToast('Error de red al probar webhook', '#ef4444'); }
       }
 
+      function toggleMuteAll() {
+        setState(s => ({ ...s, muteAll: !s.muteAll }));
+      }
+
       const value = {
         state, updateState,
         addStream, removeStream, toggleStream, clearStreams,
@@ -464,6 +469,7 @@
         addStreamer, removeStreamer, updateStreamer, moveStreamer,
         resetStorage, exportConfig, importConfig,
         sendDiscordNotification, testWebhook,
+        toggleMuteAll,
       };
 
       return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
@@ -640,7 +646,7 @@
     function Header() {
       const { state, toggleStream, clearStreams, openChat, sidebarOpen, setSidebarOpen,
               setShowDiscord, setShowAdmin, refreshStatuses, apiLoading,
-              cinemaIds, enterCinema, exitCinema } = useApp();
+              cinemaIds, enterCinema, exitCinema, toggleMuteAll } = useApp();
       const [customInput, setCustomInput] = useState('');
       const isMobile = useIsMobile();
 
@@ -728,6 +734,15 @@
             <button style={S.iconBtn(false)} onClick={() => openChat()} title="Chat">
               <Icon.Chat />
             </button>
+            {state.active.length > 0 && (
+              <button
+                style={{ ...S.iconBtn(state.muteAll), color: state.muteAll ? 'var(--red)' : 'var(--muted2)' }}
+                onClick={toggleMuteAll}
+                title={state.muteAll ? 'Activar audio (todos)' : 'Silenciar todo'}
+              >
+                <span style={{ fontSize:16 }}>{state.muteAll ? '🔇' : '🔊'}</span>
+              </button>
+            )}
             <button style={S.iconBtn(false)} onClick={() => setShowDiscord(true)} title="Notificaciones Discord">
               <Icon.Discord />
             </button>
@@ -912,7 +927,7 @@
         inset: 0,
       };
 
-      const iframeSrc = KICK_PLAYER(channelId);
+      const iframeSrc = KICK_PLAYER(channelId) + (state.muteAll ? '?muted=true' : '');
 
       return (
         // Outer: stays in the CSS grid (visible as placeholder when in cinema mode)
@@ -1485,7 +1500,9 @@
                   <code style={{color:'var(--neon)', fontFamily:'monospace', marginLeft:5}}>lasapaaaaa</code>.
                 </p>
                 <div style={{ display:'flex', flexDirection:'column', gap:6 }}>
-                  {state.streamers.map((s, idx) => (
+                  {state.streamers.map((s, idx) => {
+                    const isGangMember = Boolean(GANG_TAGS[s.id]);
+                    return (
                     <div key={s.id} style={{
                       display:'flex', alignItems:'center', gap:8,
                       background:'rgba(255,255,255,.04)', borderRadius:9, padding:'9px 12px', border:'1px solid var(--border)',
@@ -1507,8 +1524,11 @@
                         >▼</button>
                       </div>
                       <span style={{ fontSize:18, flexShrink:0 }}>{s.avatar}</span>
-                      <input value={s.name} onChange={e => updateStreamer(s.id, { name: e.target.value })}
-                        style={{ ...S.input, flex:1, padding:'5px 9px', fontSize:13 }} placeholder="Nombre" />
+                      <input value={s.name} readOnly={isGangMember}
+                        onChange={e => updateStreamer(s.id, { name: e.target.value })}
+                        style={{ ...S.input, flex:1, padding:'5px 9px', fontSize:13, opacity: isGangMember ? 0.65 : 1, cursor: isGangMember ? 'default' : 'text' }}
+                        placeholder="Nombre"
+                        title={isGangMember ? 'Nombre fijo – no editable' : 'Nombre a mostrar'} />
                       <input value={s.id} readOnly
                         style={{ ...S.input, width:130, padding:'5px 9px', fontSize:12, fontFamily:'monospace', opacity:.6 }}
                         title="Slug de Kick (no editable)" />
@@ -1520,7 +1540,8 @@
                           background:'rgba(239,68,68,.1)', border:'1px solid rgba(239,68,68,.2)', cursor:'pointer' }}
                       >✕</button>
                     </div>
-                  ))}
+                    );
+                  })}
                 </div>
                 <div style={{ borderTop:'1px solid var(--border)', paddingTop:16 }}>
                   <label style={S.label}>Añadir nuevo streamer</label>
