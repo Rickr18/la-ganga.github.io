@@ -612,7 +612,7 @@
 
       async function run() {
         setRunning(true);
-        const ms = await measurePing('https://images.kick.com/favicon.ico');
+        const ms = await measurePing('https://kick.com/img/kick-logo.svg');
         setPing(ms === null ? 'N/A' : `${ms}ms`);
         setColor(pingColor(ms));
         setRunning(false);
@@ -628,7 +628,7 @@
           color:'var(--muted2)',
         }} title="Latencia a Kick">
           <span style={{ width:7, height:7, borderRadius:'50%', background:color, display:'inline-block', flexShrink:0 }}/>
-          <Icon.Wifi />
+          <img src="https://cdn.brandfetch.io/id3gkQXO6j/w/400/h/400/theme/dark/icon.jpeg?c=1bxid64Mup7aczewSAYMX&t=1752548681236" alt="Kick" style={{ width:14, height:14, borderRadius:3, objectFit:'cover', flexShrink:0 }} />
           <span style={{ fontFamily:'monospace', color }}>{running ? '…' : (ping||'—')}</span>
         </button>
       );
@@ -641,16 +641,7 @@
       const { state, toggleStream, clearStreams, openChat, sidebarOpen, setSidebarOpen,
               setShowDiscord, setShowAdmin, refreshStatuses, apiLoading,
               cinemaIds, enterCinema, exitCinema } = useApp();
-      const [customInput, setCustomInput] = useState('');
       const isMobile = useIsMobile();
-
-      function handleAddCustom(e) {
-        e.preventDefault();
-        if (customInput.trim()) {
-          toggleStream(customInput.trim().toLowerCase());
-          setCustomInput('');
-        }
-      }
 
       return (
         <header style={{
@@ -690,17 +681,6 @@
                   <span>{s.name}</span>
                 </button>
               ))}
-              <form onSubmit={handleAddCustom} style={{ display:'flex', gap:4, flexShrink:0 }}>
-                <input
-                  value={customInput}
-                  onChange={e => setCustomInput(e.target.value)}
-                  placeholder="canal kick…"
-                  style={{ ...S.input, width:110, padding:'4px 10px', fontSize:11, borderRadius:20 }}
-                />
-                <button type="submit" style={{ ...S.btnNeon, padding:'4px 10px', borderRadius:20, fontSize:11 }}>
-                  <Icon.Plus />
-                </button>
-              </form>
             </div>
           )}
 
@@ -786,8 +766,11 @@
           <div style={{
             padding:'10px 14px', borderBottom:'1px solid var(--border)', flexShrink:0,
           }}>
-            <div style={{ fontSize:11, fontWeight:700, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'.1em' }}>
-              Streamers
+            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <img src="https://kick.com/img/kick-logo.svg" alt="Kick" style={{ height:16, width:'auto', filter:'brightness(0) invert(1)' }} />
+              <div style={{ fontSize:11, fontWeight:700, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'.1em' }}>
+                Streamers
+              </div>
             </div>
             {liveCount > 0 && (
               <div style={{ fontSize:11, color:'var(--live)', fontWeight:600, marginTop:2 }}>
