@@ -66,6 +66,8 @@
     const KICK_PLAYER = id => `https://player.kick.com/${id}`;
     const KICK_CHAT   = id => `https://kick.com/${id}/chatroom`;
     const KICK_LINK   = id => `https://kick.com/${id}`;
+    // Height (px) of Kick's chat input bar; cropped via overflow:hidden to make chat read-only
+    const KICK_CHAT_INPUT_HEIGHT = 72;
 
     // Leandro = La Sapa. Su canal en Kick es "lasapaaaaa"
     const DEFAULT_STREAMERS = [
@@ -163,7 +165,6 @@
       logoText:        'LA GANGA',
       subtitle:        'Multi-Stream Dashboard',
       pageTitle:       'La Ganga – Multi-Stream Dashboard',
-      milestoneGoal:   10000,
     };
 
     function loadState() {
@@ -229,7 +230,6 @@
               category:  (ls && ls.category && ls.category.name) || (ch.category && ch.category.name) || '',
               title:     (ls && (ls.session_title || ls.title)) || '',
               uptime:    ls ? formatUptime(ls.created_at || ls.started_at) : '',
-              followers: ch.followers_count || 0,
               error:     false,
             };
           }
@@ -242,7 +242,7 @@
           headers: { Accept: 'application/json' },
           cache: 'no-store',
         });
-        if (!res.ok) return { online: false, viewers: 0, category: '', title: '', uptime: '', followers: 0, error: false };
+        if (!res.ok) return { online: false, viewers: 0, category: '', title: '', uptime: '', error: false };
         const data = await res.json();
         const ls = data && data.livestream;
         return {
@@ -251,11 +251,10 @@
           category:  (ls && ls.categories && ls.categories[0] && ls.categories[0].name) || '',
           title:     (ls && ls.session_title) || '',
           uptime:    ls ? formatUptime(ls.created_at) : '',
-          followers: (data && data.followers_count) || 0,
           error:     false,
         };
       } catch {
-        return { online: false, viewers: 0, category: '', title: '', uptime: '', followers: 0, error: true };
+        return { online: false, viewers: 0, category: '', title: '', uptime: '', error: true };
       }
     }
 
@@ -275,7 +274,6 @@
       const [state, setState] = useState(() => loadState());
       const [toast, setToast] = useState({ msg:'', color:'', show:false });
       const [cinemaIds, setCinemaIds] = useState([]);
-      const [muteAll, setMuteAll] = useState(false);
       const [showAdmin, setShowAdmin] = useState(false);
       const [showDiscord, setShowDiscord] = useState(false);
       const [sidebarOpen, setSidebarOpen] = useState(true);
@@ -359,8 +357,6 @@
       function toggleCinema(id) {
         setCinemaIds(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]);
       }
-      function toggleMuteAll() { setMuteAll(v => !v); }
-
       function updateState(partial) { setState(s => ({ ...s, ...partial })); }
       function addStreamer(streamer) {
         setState(s => ({ ...s, streamers: [...s.streamers, streamer] }));
@@ -459,7 +455,6 @@
         addStream, removeStream, toggleStream, clearStreams,
         openChat, closeChat, setChatChannel,
         cinemaIds, enterCinema, exitCinema, toggleCinema,
-        muteAll, toggleMuteAll,
         showAdmin, setShowAdmin,
         showDiscord, setShowDiscord,
         sidebarOpen, setSidebarOpen,
@@ -645,7 +640,7 @@
     function Header() {
       const { state, toggleStream, clearStreams, openChat, sidebarOpen, setSidebarOpen,
               setShowDiscord, setShowAdmin, refreshStatuses, apiLoading,
-              muteAll, toggleMuteAll, cinemaIds, enterCinema, exitCinema } = useApp();
+              cinemaIds, enterCinema, exitCinema } = useApp();
       const [customInput, setCustomInput] = useState('');
       const isMobile = useIsMobile();
 
@@ -714,13 +709,6 @@
             {!isMobile && <LatencyPill />}
             <button style={S.iconBtn(apiLoading)} onClick={refreshStatuses} title="Actualizar estados">
               <Icon.Refresh />
-            </button>
-            <button
-              style={{ ...S.iconBtn(muteAll), color: muteAll ? 'var(--red)' : 'var(--muted2)' }}
-              onClick={toggleMuteAll}
-              title={muteAll ? 'Quitar silencio global' : 'Silenciar todo'}
-            >
-              <span style={{ fontSize:16 }}>{muteAll ? '🔇' : '🔊'}</span>
             </button>
             {state.active.length > 0 && (
               <button
@@ -887,7 +875,7 @@
        STREAM CELL
     ═══════════════════════════════════════════════════════ */
     function StreamCell({ channelId }) {
-      const { state, removeStream, cinemaIds, statusMap, showToast, muteAll } = useApp();
+      const { state, removeStream, cinemaIds, statusMap, showToast } = useApp();
       const [hovered, setHovered] = useState(false);
       const iframeRef = useRef(null);
       const prevOnlineRef = useRef(null);
@@ -924,9 +912,7 @@
         inset: 0,
       };
 
-      const iframeSrc = muteAll
-        ? `${KICK_PLAYER(channelId)}?muted=1`
-        : KICK_PLAYER(channelId);
+      const iframeSrc = KICK_PLAYER(channelId);
 
       return (
         // Outer: stays in the CSS grid (visible as placeholder when in cinema mode)
@@ -960,14 +946,6 @@
               style={{ width:'100%', height:'100%', display:'block', border:'none' }}
               title={`Stream de ${s?.name || channelId}`}
             />
-            {/* Mute indicator */}
-            {muteAll && (
-              <div style={{
-                position:'absolute', top:6, left:6, zIndex:2,
-                background:'rgba(0,0,0,.75)', borderRadius:4, padding:'2px 6px',
-                fontSize:11, color:'var(--muted)',
-              }}>🔇</div>
-            )}
             {/* Overlay controls */}
             <div style={{
               position:'absolute', top:8, right:8,
@@ -1063,10 +1041,6 @@
       const on   = state.active.includes(streamer.id);
       const st   = statusMap[streamer.id];
       const live = st && st.online;
-      const milestoneGoal = state.milestoneGoal || 10000;
-      const followers = (st && st.followers) || 0;
-      const showMilestone = followers > 0 && milestoneGoal > 0;
-      const milestonePercent = showMilestone ? Math.min(100, Math.round((followers / milestoneGoal) * 100)) : 0;
 
       return (
         <div
@@ -1113,29 +1087,6 @@
                 </div>
               )}
               {st.uptime && <div style={{ fontSize:10, color:'var(--muted)' }}>⏱ {st.uptime}</div>}
-            </div>
-          )}
-
-          {/* Milestone progress bar – only when followers data is available */}
-          {showMilestone && (
-            <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
-              <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'var(--muted2)' }}>
-                <span>🎯 Hito</span>
-                <span style={{ fontFamily:'monospace', color: streamer.color }}>{milestonePercent}%</span>
-              </div>
-              <div style={{
-                height:6, borderRadius:3, background:'rgba(255,255,255,.08)', overflow:'hidden',
-              }}>
-                <div style={{
-                  height:'100%', borderRadius:3,
-                  width:`${milestonePercent}%`,
-                  background: streamer.color,
-                  transition:'width .4s ease',
-                }} />
-              </div>
-              <div style={{ fontSize:10, color:'var(--muted)', fontFamily:'monospace', textAlign:'right' }}>
-                {fmtNum(followers)} / {fmtNum(milestoneGoal)}
-              </div>
             </div>
           )}
 
@@ -1230,11 +1181,13 @@
                   </button>
                 </div>
               </div>
-              <iframe
-                src={chatChannel ? KICK_CHAT(chatChannel) : ''}
-                style={{ flex:1, width:'100%', border:'none' }}
-                title="Kick Chat"
-              />
+              <div style={{ flex:1, overflow:'hidden', position:'relative' }}>
+                <iframe
+                  src={chatChannel ? KICK_CHAT(chatChannel) : ''}
+                  style={{ position:'absolute', top:0, left:0, width:'100%', height:`calc(100% + ${KICK_CHAT_INPUT_HEIGHT}px)`, border:'none' }}
+                  title="Kick Chat"
+                />
+              </div>
             </>
           )}
         </div>
@@ -1360,11 +1313,13 @@
                   })}
                 </select>
               </div>
-              <iframe
-                src={chatCh ? KICK_CHAT(chatCh) : ''}
-                style={{ flex:1, width:'100%', border:'none' }}
-                title="Chat modo cine"
-              />
+              <div style={{ flex:1, overflow:'hidden', position:'relative' }}>
+                <iframe
+                  src={chatCh ? KICK_CHAT(chatCh) : ''}
+                  style={{ position:'absolute', top:0, left:0, width:'100%', height:`calc(100% + ${KICK_CHAT_INPUT_HEIGHT}px)`, border:'none' }}
+                  title="Chat modo cine"
+                />
+              </div>
             </div>
           )}
         </>
@@ -1612,16 +1567,6 @@
                     <label style={S.label}>Subtítulo</label>
                     <input value={state.subtitle||''} onChange={e => updateState({ subtitle: e.target.value })}
                       style={S.input} placeholder="Multi-Stream Dashboard" />
-                  </div>
-                  <div>
-                    <label style={S.label}>🎯 Meta de hito (followers)</label>
-                    <input
-                      type="number" min="1"
-                      value={state.milestoneGoal || 10000}
-                      onChange={e => updateState({ milestoneGoal: Math.max(1, parseInt(e.target.value, 10) || 1) })}
-                      style={S.input}
-                      placeholder="10000"
-                    />
                   </div>
                 </div>
               </section>
