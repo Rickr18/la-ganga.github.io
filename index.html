@@ -62,10 +62,36 @@
     /* ═══════════════════════════════════════════════════════
        CONSTANTS & DEFAULTS
     ═══════════════════════════════════════════════════════ */
-    const LS_KEY = 'laganga_v5';
+    const LS_KEY = 'laganga_v6';
     const KICK_PLAYER = id => `https://player.kick.com/${id}`;
     const KICK_CHAT   = id => `https://kick.com/${id}/chatroom`;
     const KICK_LINK   = id => `https://kick.com/${id}`;
+
+    // ⚠️ CONFIGURA TU CLIENT ID DE KICK AQUÍ
+    const KICK_CLIENT_ID = 'TU_CLIENT_ID_AQUÍ'; // Reemplaza con tu Client ID real
+    // ⚠️ SEGURIDAD: El Client Secret NUNCA debe ir en el frontend.
+    // Para flujos que requieran el Client Secret (intercambio de código, verificación
+    // de firma de webhooks), usa un backend. Ejemplo mínimo en Node.js/Express:
+    /*
+     *   const express = require('express');
+     *   const app = express();
+     *   const CLIENT_SECRET = process.env.KICK_CLIENT_SECRET; // cargado desde .env
+     *
+     *   app.post('/auth/token', async (req, res) => {
+     *     const { code } = req.body;
+     *     const resp = await fetch('https://id.kick.com/oauth/token', {
+     *       method: 'POST',
+     *       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+     *       body: new URLSearchParams({
+     *         grant_type: 'authorization_code', code,
+     *         client_id: process.env.KICK_CLIENT_ID,
+     *         client_secret: CLIENT_SECRET,
+     *         redirect_uri: process.env.REDIRECT_URI,
+     *       }),
+     *     });
+     *     res.json(await resp.json());
+     *   });
+     */
 
     // Leandro = La Sapa. Su canal en Kick es "lasapaaaaa"
     const DEFAULT_STREAMERS = [
@@ -113,22 +139,27 @@
        STATE MANAGEMENT
     ═══════════════════════════════════════════════════════ */
     const defaultState = {
-      streamers:   DEFAULT_STREAMERS,
-      active:      [],
-      chatOpen:    false,
-      chatChannel: '',
-      webhookUrl:  '',
-      webhookMode: 'all',
-      accent:      '#53fc18',
-      logoText:    'LA GANGA',
-      subtitle:    'Multi-Stream Dashboard',
-      pageTitle:   'La Ganga – Multi-Stream Dashboard',
+      streamers:       DEFAULT_STREAMERS,
+      active:          [],
+      chatOpen:        false,
+      chatChannel:     '',
+      webhookUrl:      '',
+      webhookMode:     'all',
+      accent:          '#53fc18',
+      logoText:        'LA GANGA',
+      subtitle:        'Multi-Stream Dashboard',
+      pageTitle:       'La Ganga – Multi-Stream Dashboard',
+      kickAccessToken: '',
+      kickTokenExpiry: 0,
+      milestoneGoal:   10000,
     };
 
     function loadState() {
       try {
-        // Support migration from old storage key
-        const raw = localStorage.getItem(LS_KEY) || localStorage.getItem('laganga_v4');
+        // Support migration from old storage keys
+        const raw = localStorage.getItem(LS_KEY)
+          || localStorage.getItem('laganga_v5')
+          || localStorage.getItem('laganga_v4');
         if (!raw) return defaultState;
         const saved = JSON.parse(raw);
         const merged = { ...defaultState, ...saved };
@@ -150,9 +181,12 @@
     }
 
     /* ═══════════════════════════════════════════════════════
-       KICK API – real live status
+       KICK API – real live status (oficial v2 + fallback v1)
     ═══════════════════════════════════════════════════════ */
-    const KICK_API = slug => `https://kick.com/api/v1/channels/${slug}`;
+    // Official Kick API v2 endpoint
+    const KICK_API_V2 = slug => `https://api.kick.com/public/v1/channels?broadcaster_user_login=${slug}`;
+    // Fallback: public unofficial v1 endpoint
+    const KICK_API_V1 = slug => `https://kick.com/api/v1/channels/${slug}`;
 
     function formatUptime(createdAt) {
       if (!createdAt) return '';
@@ -164,25 +198,51 @@
       } catch { return ''; }
     }
 
-    async function fetchKickStatus(slug) {
+    async function fetchStreamData(channelName, accessToken) {
+      // Try official API v2 first (with or without token)
       try {
-        const res = await fetch(KICK_API(slug), {
+        const headers = { Accept: 'application/json' };
+        if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
+        const res = await fetch(KICK_API_V2(channelName), { headers, cache: 'no-store' });
+        if (res.ok) {
+          const data = await res.json();
+          // v2 returns { data: [ channelObject ] }
+          const ch = data && Array.isArray(data.data) && data.data[0];
+          if (ch) {
+            const ls = ch.livestream || ch.stream || null;
+            return {
+              online:    ls != null && (ls.is_live !== false),
+              viewers:   (ls && (ls.viewer_count || ls.viewers)) || 0,
+              category:  (ls && ls.category && ls.category.name) || (ch.category && ch.category.name) || '',
+              title:     (ls && (ls.session_title || ls.title)) || '',
+              uptime:    ls ? formatUptime(ls.created_at || ls.started_at) : '',
+              followers: ch.followers_count || 0,
+              error:     false,
+            };
+          }
+        }
+      } catch {}
+
+      // Fallback to unofficial v1
+      try {
+        const res = await fetch(KICK_API_V1(channelName), {
           headers: { Accept: 'application/json' },
           cache: 'no-store',
         });
-        if (!res.ok) return { online: false, viewers: 0, category: '', title: '', uptime: '', error: false };
+        if (!res.ok) return { online: false, viewers: 0, category: '', title: '', uptime: '', followers: 0, error: false };
         const data = await res.json();
         const ls = data && data.livestream;
         return {
-          online:   ls != null,
-          viewers:  (ls && ls.viewer_count) || 0,
-          category: (ls && ls.categories && ls.categories[0] && ls.categories[0].name) || '',
-          title:    (ls && ls.session_title) || '',
-          uptime:   ls ? formatUptime(ls.created_at) : '',
-          error:    false,
+          online:    ls != null,
+          viewers:   (ls && ls.viewer_count) || 0,
+          category:  (ls && ls.categories && ls.categories[0] && ls.categories[0].name) || '',
+          title:     (ls && ls.session_title) || '',
+          uptime:    ls ? formatUptime(ls.created_at) : '',
+          followers: (data && data.followers_count) || 0,
+          error:     false,
         };
       } catch {
-        return { online: false, viewers: 0, category: '', title: '', uptime: '', error: true };
+        return { online: false, viewers: 0, category: '', title: '', uptime: '', followers: 0, error: true };
       }
     }
 
@@ -217,16 +277,37 @@
         document.title = state.pageTitle || 'La Ganga – Dashboard';
       }, [state.pageTitle]);
 
+      // Handle OAuth2 callback: read access_token from URL hash on load
+      useEffect(() => {
+        const hash = window.location.hash;
+        if (!hash) return;
+        const params = new URLSearchParams(hash.slice(1));
+        const token = params.get('access_token');
+        const expiresIn = parseInt(params.get('expires_in') || '0', 10);
+        if (token) {
+          const expiry = expiresIn > 0 ? Date.now() + expiresIn * 1000 : 0;
+          setState(s => ({ ...s, kickAccessToken: token, kickTokenExpiry: expiry }));
+          // Clean the hash from the URL without reloading
+          history.replaceState(null, '', window.location.pathname + window.location.search);
+          // Will show toast after state update; use setTimeout to avoid render-phase side effect
+          setTimeout(() => showToast('✅ Conectado a Kick con OAuth2'), 100);
+        }
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      }, []);
+
       // fetch real Kick live status for all streamers
       const refreshStatuses = useCallback(async () => {
         if (!state.streamers || !state.streamers.length) return;
         setApiLoading(true);
+        // Use stored OAuth token if still valid
+        const token = (state.kickAccessToken && (!state.kickTokenExpiry || Date.now() < state.kickTokenExpiry))
+          ? state.kickAccessToken : '';
         const entries = await Promise.all(
-          state.streamers.map(async s => [s.id, await fetchKickStatus(s.id)])
+          state.streamers.map(async s => [s.id, await fetchStreamData(s.id, token)])
         );
         setStatusMap(Object.fromEntries(entries));
         setApiLoading(false);
-      }, [state.streamers]);
+      }, [state.streamers, state.kickAccessToken, state.kickTokenExpiry]);
 
       useEffect(() => {
         refreshStatuses();
@@ -290,6 +371,7 @@
       }
       function resetStorage() {
         localStorage.removeItem(LS_KEY);
+        localStorage.removeItem('laganga_v5');
         localStorage.removeItem('laganga_v4');
         setState({ ...defaultState, streamers: DEFAULT_STREAMERS });
         showToast('Datos borrados. Recargando…', '#ef4444');
@@ -353,6 +435,17 @@
         } catch { showToast('Error de red al probar webhook', '#ef4444'); }
       }
 
+      function initiateKickOAuth() {
+        const redirectUri = encodeURIComponent(window.location.origin + window.location.pathname);
+        const url = `https://id.kick.com/oauth/authorize?client_id=${KICK_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=token&scope=channel:read`;
+        window.location.href = url;
+      }
+
+      function disconnectKickOAuth() {
+        setState(s => ({ ...s, kickAccessToken: '', kickTokenExpiry: 0 }));
+        showToast('Desconectado de Kick OAuth');
+      }
+
       const value = {
         state, updateState,
         addStream, removeStream, toggleStream, clearStreams,
@@ -367,6 +460,7 @@
         addStreamer, removeStreamer, updateStreamer,
         resetStorage, exportConfig, importConfig,
         sendDiscordNotification, testWebhook,
+        initiateKickOAuth, disconnectKickOAuth,
       };
 
       return <AppCtx.Provider value={value}>{children}</AppCtx.Provider>;
@@ -755,9 +849,24 @@
        STREAM CELL
     ═══════════════════════════════════════════════════════ */
     function StreamCell({ channelId }) {
-      const { state, removeStream, enterCinema } = useApp();
+      const { state, removeStream, enterCinema, statusMap, showToast } = useApp();
       const [hovered, setHovered] = useState(false);
+      const iframeRef = useRef(null);
+      const prevOnlineRef = useRef(null);
       const s = state.streamers.find(x => x.id === channelId);
+
+      // Auto-reload iframe when stream goes from offline → online
+      useEffect(() => {
+        const st = statusMap[channelId];
+        const isOnline = st && st.online;
+        if (prevOnlineRef.current === false && isOnline === true) {
+          if (iframeRef.current) {
+            iframeRef.current.src = iframeRef.current.src;
+          }
+          showToast(`🔄 ${s?.name || channelId} volvió a conectarse – recargando stream...`, '#53fc18');
+        }
+        if (isOnline !== undefined) prevOnlineRef.current = isOnline;
+      }, [statusMap, channelId, s, showToast]);
 
       return (
         <div
@@ -766,6 +875,7 @@
           onMouseLeave={() => setHovered(false)}
         >
           <iframe
+            ref={iframeRef}
             src={KICK_PLAYER(channelId)}
             allowFullScreen
             scrolling="no"
@@ -877,6 +987,10 @@
       const on   = state.active.includes(streamer.id);
       const st   = statusMap[streamer.id];
       const live = st && st.online;
+      const milestoneGoal = state.milestoneGoal || 10000;
+      const followers = (st && st.followers) || 0;
+      const showMilestone = followers > 0 && milestoneGoal > 0;
+      const milestonePercent = showMilestone ? Math.min(100, Math.round((followers / milestoneGoal) * 100)) : 0;
 
       return (
         <div
@@ -916,6 +1030,29 @@
                 </div>
               )}
               {st.uptime && <div style={{ fontSize:10, color:'var(--muted)' }}>⏱ {st.uptime}</div>}
+            </div>
+          )}
+
+          {/* Milestone progress bar – only when followers data is available */}
+          {showMilestone && (
+            <div style={{ display:'flex', flexDirection:'column', gap:4 }}>
+              <div style={{ display:'flex', justifyContent:'space-between', fontSize:10, color:'var(--muted2)' }}>
+                <span>🎯 Hito</span>
+                <span style={{ fontFamily:'monospace', color: streamer.color }}>{milestonePercent}%</span>
+              </div>
+              <div style={{
+                height:6, borderRadius:3, background:'rgba(255,255,255,.08)', overflow:'hidden',
+              }}>
+                <div style={{
+                  height:'100%', borderRadius:3,
+                  width:`${milestonePercent}%`,
+                  background: streamer.color,
+                  transition:'width .4s ease',
+                }} />
+              </div>
+              <div style={{ fontSize:10, color:'var(--muted)', fontFamily:'monospace', textAlign:'right' }}>
+                {fmtNum(followers)} / {fmtNum(milestoneGoal)}
+              </div>
             </div>
           )}
 
@@ -1176,7 +1313,8 @@
     ═══════════════════════════════════════════════════════ */
     function AdminPanel() {
       const { state, updateState, setShowAdmin, addStreamer, removeStreamer, updateStreamer,
-              resetStorage, exportConfig, importConfig, testWebhook, showToast } = useApp();
+              resetStorage, exportConfig, importConfig, testWebhook, showToast,
+              initiateKickOAuth, disconnectKickOAuth } = useApp();
       const [newName, setNewName] = useState('');
       const [newId, setNewId]     = useState('');
       const [newColor, setNewColor] = useState('#53fc18');
@@ -1209,6 +1347,8 @@
         reader.onload = ev => importConfig(ev.target.result);
         reader.readAsText(file);
       }
+
+      const isKickConnected = !!(state.kickAccessToken && (!state.kickTokenExpiry || Date.now() < state.kickTokenExpiry));
 
       const tabs = [
         { id:'streamers',  label:'🎮 Streamers' },
@@ -1327,6 +1467,19 @@
                     <input value={state.subtitle||''} onChange={e => updateState({ subtitle: e.target.value })}
                       style={S.input} placeholder="Multi-Stream Dashboard" />
                   </div>
+                  <div>
+                    <label style={S.label}>🎯 Meta de hito (followers)</label>
+                    <input
+                      type="number" min="1"
+                      value={state.milestoneGoal || 10000}
+                      onChange={e => updateState({ milestoneGoal: Math.max(1, parseInt(e.target.value, 10) || 1) })}
+                      style={S.input}
+                      placeholder="10000"
+                    />
+                    <div style={{ fontSize:11, color:'var(--muted)', marginTop:5 }}>
+                      Requiere token OAuth de Kick para obtener datos de seguidores.
+                    </div>
+                  </div>
                 </div>
               </section>
             )}
@@ -1334,6 +1487,52 @@
             {/* ADVANCED */}
             {activeTab==='advanced' && (
               <>
+                {/* OAuth2 section */}
+                <section style={sectionStyle}>
+                  <h2 style={h2Style}>🔑 Kick OAuth2</h2>
+                  <p style={pStyle}>
+                    Conecta con la API oficial de Kick v2 para obtener datos adicionales como el conteo de seguidores.
+                    El token se guarda en la configuración local.
+                  </p>
+                  <div style={{
+                    display:'flex', alignItems:'center', gap:10, padding:'10px 14px',
+                    borderRadius:9, border:`1px solid ${isKickConnected ? 'rgba(34,197,94,.3)' : 'rgba(239,68,68,.3)'}`,
+                    background: isKickConnected ? 'rgba(34,197,94,.06)' : 'rgba(239,68,68,.06)',
+                    fontSize:13, fontWeight:600,
+                    color: isKickConnected ? 'var(--live)' : 'var(--red)',
+                  }}>
+                    <span style={{ fontSize:18 }}>{isKickConnected ? '✅' : '❌'}</span>
+                    <span>{isKickConnected ? 'Conectado a Kick' : 'Sin token OAuth'}</span>
+                  </div>
+                  <div style={{ display:'flex', gap:8, flexWrap:'wrap' }}>
+                    <button
+                      onClick={initiateKickOAuth}
+                      style={{ ...S.btnNeon, display:'flex', alignItems:'center', gap:7 }}
+                    >
+                      🔑 Conectar con Kick
+                    </button>
+                    {isKickConnected && (
+                      <button
+                        onClick={disconnectKickOAuth}
+                        style={{ ...S.btnOutline('#ef4444'), color:'#ef4444' }}
+                      >
+                        Desconectar
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ fontSize:11, color:'var(--muted)', lineHeight:1.7 }}>
+                    <strong style={{ color:'var(--white)' }}>¿Cómo funciona?</strong><br/>
+                    Al hacer clic en "Conectar con Kick" serás redirigido al portal de autorización de Kick.
+                    Tras autorizar, el token se captura automáticamente y se usa en las peticiones a la API v2.
+                    <br/>
+                    <strong style={{ color:'var(--yellow)' }}>⚠️ Client ID configurado:</strong>{' '}
+                    <code style={{ fontFamily:'monospace', color:'var(--neon)' }}>{KICK_CLIENT_ID}</code>
+                    {KICK_CLIENT_ID === 'TU_CLIENT_ID_AQUÍ' && (
+                      <span style={{ color:'var(--red)', marginLeft:6 }}>← Reemplaza en el código</span>
+                    )}
+                  </div>
+                </section>
+
                 <section style={sectionStyle}>
                   <h2 style={h2Style}>🔔 Webhook de Discord</h2>
                   <p style={pStyle}>
@@ -1351,16 +1550,68 @@
                   </div>
                 </section>
 
+                {/* Kick Webhooks documentation card */}
+                <section style={sectionStyle}>
+                  <h2 style={h2Style}>🔗 Webhooks de Kick → Discord (Requiere backend)</h2>
+                  <p style={pStyle}>
+                    Para recibir eventos en tiempo real desde Kick (ej. cuando un streamer va en vivo),
+                    necesitas un servidor backend que reciba los webhooks de Kick y los reenvíe a Discord.
+                    El proyecto incluye un servidor Express mínimo en <code style={{color:'var(--neon)'}}>backend/server.js</code>.
+                  </p>
+                  <pre style={{
+                    background:'rgba(0,0,0,.5)', border:'1px solid var(--border)',
+                    borderRadius:8, padding:'14px 16px', fontSize:11,
+                    fontFamily:'monospace', lineHeight:1.8, color:'var(--muted2)',
+                    overflowX:'auto', whiteSpace:'pre-wrap', wordBreak:'break-word',
+                  }}>
+{`/*
+ * ══════════════════════════════════════════════════════════
+ * CONFIGURACIÓN DE WEBHOOKS DE KICK (Requiere backend)
+ * ══════════════════════════════════════════════════════════
+ *
+ * 1. En el Developer Portal de Kick, habilita "Webhooks" en tu app
+ *    y configura la URL: https://tu-servidor.com/kick-webhook
+ *
+ * 2. Kick enviará eventos POST a esa URL. Evento clave:
+ *    - "stream.online" → cuando un streamer se pone en vivo
+ *
+ * 3. Ejemplo de handler en Node.js (Express):
+ *
+ *    app.post('/kick-webhook', (req, res) => {
+ *      const event = req.body;
+ *      if (event.type === 'stream.online') {
+ *        const { broadcaster_user_login } = event.data;
+ *        fetch(DISCORD_WEBHOOK_URL, {
+ *          method: 'POST',
+ *          headers: { 'Content-Type': 'application/json' },
+ *          body: JSON.stringify({
+ *            content: \`🟢 **\${broadcaster_user_login}** está EN VIVO en Kick!\`
+ *          })
+ *        });
+ *      }
+ *      res.sendStatus(200);
+ *    });
+ *
+ * 4. El Client Secret se usa en el backend para verificar la firma
+ *    del webhook (header: Kick-Event-Signature).
+ *    NUNCA expongas el Client Secret en el frontend.
+ * ══════════════════════════════════════════════════════════
+ */`}
+                  </pre>
+                </section>
+
                 <section style={sectionStyle}>
                   <h2 style={h2Style}>🔗 Estado en tiempo real</h2>
                   <p style={pStyle}>
-                    El estado en vivo se obtiene de la API pública de Kick. Se actualiza cada 45 segundos.
-                    Si ves "N/A" es porque el canal no pudo ser alcanzado (CORS / red).
+                    El estado en vivo se obtiene preferentemente de la API oficial de Kick v2.
+                    Si no hay token OAuth2, se usa la API pública v1 como fallback.
+                    Se actualiza cada 45 segundos.
                   </p>
                   <div style={{ background:'rgba(83,252,24,.06)', border:'1px solid rgba(83,252,24,.15)',
                     borderRadius:8, padding:'12px 16px', fontSize:12, fontFamily:'monospace', lineHeight:1.9, color:'var(--muted2)' }}>
-                    <div><span style={{color:'var(--muted)'}}>GET</span> <span style={{color:'var(--neon)'}}>https://kick.com/api/v1/channels/<span style={{color:'var(--yellow)'}}>slug</span></span></div>
-                    <div style={{marginTop:4}}><span style={{color:'var(--muted)'}}>→</span> livestream.viewer_count, .categories, .created_at</div>
+                    <div><span style={{color:'var(--muted)'}}>GET (v2 oficial)</span> <span style={{color:'var(--neon)'}}>https://api.kick.com/public/v1/channels?broadcaster_user_login=<span style={{color:'var(--yellow)'}}>slug</span></span></div>
+                    <div style={{marginTop:4}}><span style={{color:'var(--muted)'}}>GET (v1 fallback)</span> <span style={{color:'var(--muted2)'}}>https://kick.com/api/v1/channels/<span style={{color:'var(--yellow)'}}>slug</span></span></div>
+                    <div style={{marginTop:4}}><span style={{color:'var(--muted)'}}>→</span> livestream.viewer_count, followers_count, .categories, .created_at</div>
                   </div>
                 </section>
 
